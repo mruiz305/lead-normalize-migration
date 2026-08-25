@@ -1,0 +1,2 @@
+-- Migración v2: usar `npm run migrate` (transformación cross-server en Node).
+-- Este archivo ya no se ejecuta directamente.
