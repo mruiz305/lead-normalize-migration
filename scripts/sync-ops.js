@@ -2,14 +2,17 @@
 /**
  * Un ciclo operativo prod → TNFG_INTAKE (incremental).
  *
- * Por defecto (vía sync:cron / CronManager como datamart):
+ * Por defecto (vía sync:cron / CronManager):
  *   1) sync:ref-attorney
- *   2) sync:incremental
- *   3) backfill:attorney-miss
- *   4) sync:lead-comments -- --resume
+ *   2) sync:users (g_users → app_user por email)
+ *   3) sync:incremental
+ *   4) backfill:attorney-miss
+ *   5) sync:lead-comments -- --resume
  *
- * Opcionales: --with-catalogs --with-users --with-legacy-ops
- *             --skip-attorney --skip-leads --skip-comments --skip-backfill
+ * El datamart ETL es independiente (su propio cron: ETL_DM_CRON).
+ *
+ * Opcionales: --with-catalogs --with-legacy-ops
+ *             --skip-attorney --skip-users --skip-leads --skip-comments --skip-backfill
  *
  * Uso:
  *   npm run sync:ops
@@ -26,8 +29,8 @@ function parseArgs(argv) {
   return {
     dryRun: argv.includes('--dry-run'),
     withCatalogs: argv.includes('--with-catalogs'),
-    withUsers: argv.includes('--with-users'),
     withLegacyOps: argv.includes('--with-legacy-ops'),
+    skipUsers: argv.includes('--skip-users'),
     skipAttorney: argv.includes('--skip-attorney'),
     skipLeads: argv.includes('--skip-leads'),
     skipComments: argv.includes('--skip-comments'),
@@ -68,7 +71,9 @@ function plan(opts) {
   } else if (!opts.skipAttorney) {
     steps.push({ script: 'sync:ref-attorney', args: [] });
   }
-  if (opts.withUsers) steps.push({ script: 'copy-users', args: [] });
+  if (!opts.skipUsers) {
+    steps.push({ script: 'sync:users', args: [] });
+  }
   if (opts.withLegacyOps) steps.push({ script: 'copy:legacy-ops', args: [] });
   if (!opts.skipLeads) {
     const leadArgs = [];
@@ -103,7 +108,10 @@ async function runSyncOps(argv = process.argv.slice(2)) {
   const timings = [];
   for (const s of steps) {
     const ms = runNpm(s.script, s.args);
-    timings.push({ step: `${s.script}${s.args.length ? ' ' + s.args.join(' ') : ''}`, ms });
+    timings.push({
+      step: `${s.script}${s.args.length ? ' ' + s.args.join(' ') : ''}`,
+      ms,
+    });
   }
   const totalMs = Date.now() - t0;
   console.log('\n── tiempos ──');
