@@ -329,7 +329,7 @@ function transformLead(l, maps) {
     channels,
     addresses: buildClientAddresses(l, maps, leadId, rejects),
     lead: [
-      leadId, idLeadStatus, idStage, idCompanyOffice, submitterUserId,
+      leadId, leadId, idLeadStatus, idStage, idCompanyOffice, submitterUserId,
       trimOrNull(l.referralSource), trimOrNull(l.sourceType), trimOrNull(l.internalSource),
       trimOrNull(l.caseType), trimOrNull(l.accidentOrWC),
       bool(l.isVIP), bool(l.isHotLead), l.hotLeadStartTime, bool(l.boostYN), bool(l.confirmed), l.cnvValue,
@@ -506,7 +506,7 @@ async function flushLeadBatch(targetConn, items, maps) {
   }
 
   await bulkInsert(targetConn, db, 'lead', [
-    'id_lead', 'id_lead_status', 'id_stage', 'id_company_office', 'submitter_user_id',
+    'id_lead', 'glide_id', 'id_lead_status', 'id_stage', 'id_company_office', 'submitter_user_id',
     'referral_source', 'source_type', 'internal_source', 'case_type', 'accident_or_wc',
     'is_vip', 'is_hot_lead', 'hot_lead_start_at', 'boost_yn', 'confirmed', 'cnv_value',
     'callback_id', 'callback_id_new', 'is_callback', 'is_callback_new',
@@ -689,9 +689,10 @@ async function migrateOneLead(targetConn, l, maps) {
 }
 
 async function getResumeWatermark(targetConn) {
+  // Watermark = progreso vs Glide/prod, no MAX(id_lead) local (portal puede subir AUTO).
   const db = config.target.database;
   const [[row]] = await targetConn.query(
-    `SELECT COALESCE(MAX(id_lead), 0) AS maxId FROM \`${db}\`.\`lead\``
+    `SELECT COALESCE(MAX(glide_id), 0) AS maxId FROM \`${db}\`.\`lead\``
   );
   return Number(row.maxId);
 }
@@ -716,7 +717,7 @@ async function runMigration(sourceConn, targetConn, maps, {
     afterId = fromId != null ? Number(fromId) : watermark;
     if (fromId != null && Number(fromId) < watermark) {
       throw new Error(
-        `--from-id ${fromId} es menor que MAX(id_lead) en destino (${watermark}). Usa --resume sin --from-id.`
+        `--from-id ${fromId} es menor que MAX(glide_id) en destino (${watermark}). Usa --resume sin --from-id.`
       );
     }
   }

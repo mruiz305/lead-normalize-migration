@@ -658,6 +658,7 @@ CREATE TABLE user_access_grant (
 -- Lead (caso intake)
 CREATE TABLE `lead` (
   id_lead int NOT NULL AUTO_INCREMENT,
+  glide_id int DEFAULT NULL COMMENT 'idLead en Glide/prod — NULL si aún no enlazado (puente cutover)',
   id_lead_status int DEFAULT NULL,
   id_stage tinyint DEFAULT NULL,
   id_company_office int DEFAULT NULL COMMENT 'Oficina del caso — FK catálogo (officeLabel)',
@@ -693,6 +694,7 @@ CREATE TABLE `lead` (
   updated_by_user_id int DEFAULT NULL,
   updated_at datetime DEFAULT NULL,
   PRIMARY KEY (id_lead),
+  UNIQUE KEY uk_lead_glide_id (glide_id),
   KEY idx_lead_status (id_lead_status),
   KEY idx_lead_company_office (id_company_office),
   KEY idx_lead_submitter (submitter_user_id),

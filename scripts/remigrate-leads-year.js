@@ -62,7 +62,7 @@ async function collectYearIds(conn, db, year) {
     ) ENGINE=Memory
   `);
 
-  // IDs en staging del año
+  // IDs en staging del año (idLead Glide)
   const [insSrc] = await conn.query(
     `INSERT IGNORE INTO tmp_remigrate_year_ids (id_lead)
      SELECT idLead FROM \`${db}\`.\`${DEST_TABLE}\`
@@ -70,10 +70,10 @@ async function collectYearIds(conn, db, year) {
     [from, to]
   );
 
-  // Por si hay residuales en modelo con created_at del año y sin fila en staging
+  // Residuales en modelo: usar glide_id si existe (puente), si no id_lead histórico
   const [insNorm] = await conn.query(
     `INSERT IGNORE INTO tmp_remigrate_year_ids (id_lead)
-     SELECT id_lead FROM \`${db}\`.\`lead\`
+     SELECT COALESCE(glide_id, id_lead) FROM \`${db}\`.\`lead\`
      WHERE created_at >= ? AND created_at < ?`,
     [from, to]
   );
@@ -109,14 +109,16 @@ async function deleteYearLeads(conn, db, year) {
   const [r0] = await conn.query(`
     DELETE lpis FROM \`${db}\`.lead_party_injury_site lpis
     INNER JOIN \`${db}\`.lead_party lp ON lp.id_lead_party = lpis.id_lead_party
-    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = lp.id_lead
+    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
+    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
   `);
   console.log(`    ${r0.affectedRows} filas`);
 
   console.log('  lead_party…');
   const [rParty] = await conn.query(`
     DELETE lp FROM \`${db}\`.lead_party lp
-    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = lp.id_lead
+    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
+    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
   `);
   console.log(`    ${rParty.affectedRows} filas`);
 
@@ -124,7 +126,8 @@ async function deleteYearLeads(conn, db, year) {
     process.stdout.write(`  ${table}…`);
     const [r] = await conn.query(`
       DELETE c FROM \`${db}\`.\`${table}\` c
-      INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = c.id_lead
+      INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = c.id_lead
+      INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
     `);
     console.log(` ${r.affectedRows}`);
   }
@@ -132,7 +135,7 @@ async function deleteYearLeads(conn, db, year) {
   console.log('  lead…');
   const [rLead] = await conn.query(`
     DELETE l FROM \`${db}\`.\`lead\` l
-    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = l.id_lead
+    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
   `);
   console.log(`    ${rLead.affectedRows} filas`);
 

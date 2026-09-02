@@ -24,7 +24,7 @@ const MIGRATION_SOURCES = [
     volume: '~147K filas',
     color: 'teal',
     destinations: [
-      { label: 'Núcleo del caso', tables: ['lead'], note: 'PK id_lead = idLead legacy' },
+      { label: 'Núcleo del caso', tables: ['lead'], note: 'PK id_lead local; glide_id = puente Glide (histórico iguales)' },
       { label: 'Ciclo de vida', tables: ['lead_timeline', 'lead_status_event'], note: 'Fechas y cambios de status del lead' },
       { label: 'Org congelada', tables: ['lead_org_snapshot'], note: 'Directorate → duo al momento de crear el caso' },
       { label: 'Lesionado', tables: ['client', 'client_channel', 'client_address'], note: 'Persona principal del caso' },

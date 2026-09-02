@@ -101,18 +101,22 @@ async function loadDurationEvents(sourceConn, targetConn, leadCount) {
   if (config.sameServerAsTarget) {
     logStep('dashLeadStatusDuration (join SQL)…');
     const [rows] = await targetConn.query(`
-      SELECT d.IdLeadStatusDuration, d.idLead, d.valueBefore, d.valueAfter, d.statusBegin, d.statusEnd
+      SELECT d.IdLeadStatusDuration, l.id_lead AS idLead,
+             d.valueBefore, d.valueAfter, d.statusBegin, d.statusEnd
       FROM \`${src}\`.dashLeadStatusDuration d
-      INNER JOIN \`${tgt}\`.lead l ON l.id_lead = d.idLead
-      ORDER BY d.idLead, d.statusBegin, d.IdLeadStatusDuration
+      INNER JOIN \`${tgt}\`.lead l ON COALESCE(l.glide_id, l.id_lead) = d.idLead
+      ORDER BY l.id_lead, d.statusBegin, d.IdLeadStatusDuration
     `);
     return rows;
   }
 
   logStep(`dashLeadStatusDuration (~${leadCount} leads, por lotes)…`);
-  const [ids] = await targetConn.query(`SELECT id_lead FROM \`${tgt}\`.lead`);
+  const [idRows] = await targetConn.query(
+    `SELECT id_lead, COALESCE(glide_id, id_lead) AS glide_key FROM \`${tgt}\`.lead`
+  );
+  const localByGlide = new Map(idRows.map((r) => [Number(r.glide_key), Number(r.id_lead)]));
   const out = [];
-  const batches = chunk(ids.map((r) => r.id_lead), 5000);
+  const batches = chunk(idRows.map((r) => Number(r.glide_key)), 5000);
   for (let i = 0; i < batches.length; i++) {
     const [rows] = await sourceConn.query(
       `SELECT IdLeadStatusDuration, idLead, valueBefore, valueAfter, statusBegin, statusEnd
@@ -120,7 +124,11 @@ async function loadDurationEvents(sourceConn, targetConn, leadCount) {
        ORDER BY idLead, statusBegin, IdLeadStatusDuration`,
       [batches[i]]
     );
-    out.push(...rows);
+    for (const r of rows) {
+      const localId = localByGlide.get(Number(r.idLead));
+      if (localId == null) continue;
+      out.push({ ...r, idLead: localId });
+    }
     if ((i + 1) % 10 === 0 || i === batches.length - 1) {
       logStep(`  duration ${i + 1}/${batches.length} lotes (${out.length} filas)`);
     }
@@ -135,20 +143,23 @@ async function loadCatalogStatusEvents(sourceConn, targetConn, leadCount) {
   if (config.sameServerAsTarget) {
     logStep('tblLeadsStatus (join SQL)…');
     const [rows] = await targetConn.query(`
-      SELECT s.Id, s.idLead, s.createdBy, s.createdAt,
+      SELECT s.Id, l.id_lead AS idLead, s.createdBy, s.createdAt,
              c.value AS catalogValue, c.statusTypeId
       FROM \`${src}\`.tblLeadsStatus s
       INNER JOIN \`${src}\`.tblLeadsStatusCatalog c ON c.Id = s.leadsStatusCatalogId
-      INNER JOIN \`${tgt}\`.lead l ON l.id_lead = s.idLead
-      ORDER BY s.idLead, s.createdAt, s.Id
+      INNER JOIN \`${tgt}\`.lead l ON COALESCE(l.glide_id, l.id_lead) = s.idLead
+      ORDER BY l.id_lead, s.createdAt, s.Id
     `);
     return rows;
   }
 
   logStep(`tblLeadsStatus (~${leadCount} leads, por lotes)…`);
-  const [ids] = await targetConn.query(`SELECT id_lead FROM \`${tgt}\`.lead`);
+  const [idRows] = await targetConn.query(
+    `SELECT id_lead, COALESCE(glide_id, id_lead) AS glide_key FROM \`${tgt}\`.lead`
+  );
+  const localByGlide = new Map(idRows.map((r) => [Number(r.glide_key), Number(r.id_lead)]));
   const out = [];
-  const batches = chunk(ids.map((r) => r.id_lead), 5000);
+  const batches = chunk(idRows.map((r) => Number(r.glide_key)), 5000);
   for (let i = 0; i < batches.length; i++) {
     const [rows] = await sourceConn.query(
       `SELECT s.Id, s.idLead, s.createdBy, s.createdAt,
@@ -159,7 +170,11 @@ async function loadCatalogStatusEvents(sourceConn, targetConn, leadCount) {
        ORDER BY s.idLead, s.createdAt, s.Id`,
       [batches[i]]
     );
-    out.push(...rows);
+    for (const r of rows) {
+      const localId = localByGlide.get(Number(r.idLead));
+      if (localId == null) continue;
+      out.push({ ...r, idLead: localId });
+    }
     if ((i + 1) % 10 === 0 || i === batches.length - 1) {
       logStep(`  catalog ${i + 1}/${batches.length} lotes (${out.length} filas)`);
     }

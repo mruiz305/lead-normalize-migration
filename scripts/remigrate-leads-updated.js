@@ -81,6 +81,7 @@ async function collectIds(conn, db, since) {
 }
 
 async function deleteCollected(conn, db) {
+  // TMP.id_lead = idLead Glide/src → resolver lead local vía glide_id (fallback id_lead).
   const childDirect = [
     'lead_insurance',
     'lead_note',
@@ -101,14 +102,16 @@ async function deleteCollected(conn, db) {
   const [r0] = await conn.query(`
     DELETE lpis FROM \`${db}\`.lead_party_injury_site lpis
     INNER JOIN \`${db}\`.lead_party lp ON lp.id_lead_party = lpis.id_lead_party
-    INNER JOIN ${TMP} t ON t.id_lead = lp.id_lead
+    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
+    INNER JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
   `);
   console.log(`    ${r0.affectedRows}`);
 
   console.log('  lead_party…');
   const [rParty] = await conn.query(`
     DELETE lp FROM \`${db}\`.lead_party lp
-    INNER JOIN ${TMP} t ON t.id_lead = lp.id_lead
+    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
+    INNER JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
   `);
   console.log(`    ${rParty.affectedRows}`);
 
@@ -116,7 +119,8 @@ async function deleteCollected(conn, db) {
     process.stdout.write(`  ${table}…`);
     const [r] = await conn.query(`
       DELETE c FROM \`${db}\`.\`${table}\` c
-      INNER JOIN ${TMP} t ON t.id_lead = c.id_lead
+      INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = c.id_lead
+      INNER JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
     `);
     console.log(` ${r.affectedRows}`);
   }
@@ -124,7 +128,7 @@ async function deleteCollected(conn, db) {
   console.log('  lead…');
   const [rLead] = await conn.query(`
     DELETE l FROM \`${db}\`.\`lead\` l
-    INNER JOIN ${TMP} t ON t.id_lead = l.id_lead
+    INNER JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
   `);
   console.log(`    ${rLead.affectedRows}`);
   return Number(rLead.affectedRows);
@@ -196,11 +200,11 @@ async function main() {
     const ids = await collectIds(targetConn, db, opts.since);
     const [[inNorm]] = await targetConn.query(
       `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
-       INNER JOIN ${TMP} t ON t.id_lead = l.id_lead`
+       INNER JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)`
     );
     const [[keep]] = await targetConn.query(
       `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
-       LEFT JOIN ${TMP} t ON t.id_lead = l.id_lead
+       LEFT JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
        WHERE t.id_lead IS NULL`
     );
 

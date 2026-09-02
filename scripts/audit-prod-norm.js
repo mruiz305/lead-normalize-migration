@@ -14,9 +14,11 @@ const { withSource, withTarget, closeAll } = require('../src/db');
 function parseArgs(argv) {
   const monthIdx = argv.indexOf('--month');
   const sampleIdx = argv.indexOf('--sample');
+  const hoursIdx = argv.indexOf('--hours');
   return {
     month: monthIdx >= 0 ? argv[monthIdx + 1] : null,
     sample: sampleIdx >= 0 ? Number(argv[sampleIdx + 1]) : null,
+    hours: hoursIdx >= 0 ? Number(argv[hoursIdx + 1]) : 72,
   };
 }
 
@@ -45,25 +47,29 @@ async function countAudit() {
   let stagingCount = 0;
   let leadCount = 0;
   let leadMax = 0;
+  let leadMaxGlide = 0;
   let stagingNotMigrated = 0;
   await withTarget(async (c) => {
     const [[s]] = await c.query(`SELECT COUNT(*) c FROM \`${tgtDb}\`.tblLeads_src`);
-    const [[l]] = await c.query(`SELECT COUNT(*) c, MAX(id_lead) m FROM \`${tgtDb}\`.\`lead\``);
+    const [[l]] = await c.query(
+      `SELECT COUNT(*) c, MAX(id_lead) m, MAX(glide_id) mg FROM \`${tgtDb}\`.\`lead\``
+    );
     const [[miss]] = await c.query(`
       SELECT COUNT(*) c FROM \`${tgtDb}\`.tblLeads_src src
-      LEFT JOIN \`${tgtDb}\`.\`lead\` l ON l.id_lead = src.idLead
+      LEFT JOIN \`${tgtDb}\`.\`lead\` l ON COALESCE(l.glide_id, l.id_lead) = src.idLead
       WHERE l.id_lead IS NULL
     `);
     stagingCount = s.c;
     leadCount = l.c;
     leadMax = l.m;
+    leadMaxGlide = l.mg;
     stagingNotMigrated = miss.c;
   });
 
   console.log('=== Conteos ===');
   console.log(`  prod tblLeads:     ${prodCount} (max ${prodMax})`);
   console.log(`  staging:           ${stagingCount}`);
-  console.log(`  lead (norm):       ${leadCount} (max ${leadMax})`);
+  console.log(`  lead (norm):       ${leadCount} (max id_lead ${leadMax}, max glide_id ${leadMaxGlide})`);
   console.log(`  prod - lead:       ${prodCount - leadCount}`);
   console.log(`  staging sin lead:  ${stagingNotMigrated}`);
 
@@ -84,19 +90,20 @@ async function valueAudit(range, sampleLimit) {
   const srcDb = config.source.database;
   const tgtDb = config.target.database;
 
-  let idList = [];
+  let idList = []; // glide keys (prod idLead)
   await withTarget(async (c) => {
-    let sql = `SELECT l.id_lead FROM \`${tgtDb}\`.\`lead\` l`;
+    let sql = `SELECT COALESCE(l.glide_id, l.id_lead) AS glide_key, l.id_lead
+               FROM \`${tgtDb}\`.\`lead\` l`;
     const params = [];
     if (range) {
       sql += ` JOIN lead_timeline lt ON lt.id_lead = l.id_lead
                WHERE lt.date_locked_down >= ? AND lt.date_locked_down < ?`;
       params.push(range.start, range.end);
     }
-    sql += ' ORDER BY l.id_lead';
+    sql += ' ORDER BY glide_key';
     if (sampleLimit) sql += ` LIMIT ${sampleLimit}`;
     const [rows] = await c.query(sql, params);
-    idList = rows.map((r) => r.id_lead);
+    idList = rows.map((r) => ({ glideKey: Number(r.glide_key), idLead: Number(r.id_lead) }));
   });
 
   const label = range ? `LD ${range.label}` : sampleLimit ? `sample ${sampleLimit}` : 'all';
@@ -112,42 +119,47 @@ async function valueAudit(range, sampleLimit) {
     missingProd: 0,
   };
   const attorneySamples = [];
+  const statusSamples = [];
   const BATCH = 2000;
 
   for (let i = 0; i < idList.length; i += BATCH) {
     const chunk = idList.slice(i, i + BATCH);
-    const ph = chunk.map(() => '?').join(',');
+    const glideKeys = chunk.map((r) => r.glideKey);
+    const localIds = chunk.map((r) => r.idLead);
+    const phG = glideKeys.map(() => '?').join(',');
+    const phL = localIds.map(() => '?').join(',');
 
     const [prodRows] = await withSource((c) =>
       c.query(
         `SELECT idLead, dateLockedDown, appointmentDateTime, attorney, txLocation, leadStatus, updated
-         FROM \`${srcDb}\`.tblLeads WHERE idLead IN (${ph})`,
-        chunk
+         FROM \`${srcDb}\`.tblLeads WHERE idLead IN (${phG})`,
+        glideKeys
       )
     );
     const [normRows] = await withTarget((c) =>
       c.query(
-        `SELECT l.id_lead, lt.date_locked_down, lc.appointment_at,
+        `SELECT l.id_lead, COALESCE(l.glide_id, l.id_lead) AS glide_key,
+          lt.date_locked_down, lc.appointment_at,
           ra.display_name AS attorney, rtl.display_name AS txLocation,
           rls.leadStatus, l.updated_at
          FROM \`${tgtDb}\`.\`lead\` l
-         JOIN lead_timeline lt ON lt.id_lead = l.id_lead
-         JOIN lead_clinical lc ON lc.id_lead = l.id_lead
+         LEFT JOIN lead_timeline lt ON lt.id_lead = l.id_lead
+         LEFT JOIN lead_clinical lc ON lc.id_lead = l.id_lead
          LEFT JOIN lead_legal ll ON ll.id_lead = l.id_lead
          LEFT JOIN ref_attorney ra ON ra.id_attorney = ll.id_attorney
          LEFT JOIN ref_tx_location rtl ON rtl.id_tx_location = lc.id_tx_location
          LEFT JOIN refLeadStatus rls ON rls.idLeadStatus = l.id_lead_status
-         WHERE l.id_lead IN (${ph})`,
-        chunk
+         WHERE l.id_lead IN (${phL})`,
+        localIds
       )
     );
 
-    const prodMap = new Map(prodRows.map((r) => [r.idLead, r]));
-    const normMap = new Map(normRows.map((r) => [r.id_lead, r]));
+    const prodMap = new Map(prodRows.map((r) => [Number(r.idLead), r]));
+    const normMap = new Map(normRows.map((r) => [Number(r.glide_key), r]));
 
-    for (const id of chunk) {
-      const p = prodMap.get(id);
-      const n = normMap.get(id);
+    for (const { glideKey } of chunk) {
+      const p = prodMap.get(glideKey);
+      const n = normMap.get(glideKey);
       if (!p) {
         mm.missingProd++;
         continue;
@@ -159,12 +171,24 @@ async function valueAudit(range, sampleLimit) {
       if (normStr(p.attorney)?.toLowerCase() !== normStr(n.attorney)?.toLowerCase()) {
         mm.attorney++;
         if (attorneySamples.length < 5) {
-          attorneySamples.push({ id, prod: p.attorney, norm: n.attorney });
+          attorneySamples.push({ id: glideKey, prod: p.attorney, norm: n.attorney });
         }
       }
       if (normStr(p.txLocation)?.toLowerCase() !== normStr(n.txLocation)?.toLowerCase()) mm.tx++;
-      if (normStr(p.leadStatus) !== normStr(n.leadStatus)) mm.status++;
-      if (new Date(p.updated) > new Date(n.updated_at)) mm.stale++;
+      if (normStr(p.leadStatus) !== normStr(n.leadStatus)) {
+        mm.status++;
+        if (statusSamples.length < 10) {
+          statusSamples.push({
+            glide_id: glideKey,
+            id_lead: n.id_lead,
+            prod: p.leadStatus,
+            norm: n.leadStatus,
+            prodUpdated: p.updated,
+            normUpdated: n.updated_at,
+          });
+        }
+      }
+      if (p.updated && n.updated_at && new Date(p.updated) > new Date(n.updated_at)) mm.stale++;
     }
   }
 
@@ -172,10 +196,93 @@ async function valueAudit(range, sampleLimit) {
   if (attorneySamples.length) {
     console.log('  Attorney samples:', attorneySamples);
   }
+  if (statusSamples.length) {
+    console.log('  Status samples (prod vs norm):');
+    for (const s of statusSamples) {
+      console.log(
+        `    glide=${s.glide_id} local=${s.id_lead} | prod="${s.prod}" norm="${s.norm}" | prod.upd=${s.prodUpdated} norm.upd=${s.normUpdated}`
+      );
+    }
+  }
   if (mm.ld + mm.appt + mm.attorney + mm.tx + mm.status === 0 && mm.stale === 0) {
     console.log('  ✓ Valores alineados con prod');
-  } else if (mm.stale > 0 && mm.attorney <= mm.stale) {
-    console.log(`  · ${mm.stale} leads con prod.updated > norm (correr sync:incremental)`);
+  } else if (mm.stale > 0) {
+    console.log(`  · ${mm.stale} leads con prod.updated > norm (correr sync:ops / remigrate:updated)`);
+  }
+}
+
+/** Leads tocados en prod recientemente: ¿estado ya refleja en norm? */
+async function recentStatusAudit(hours = 72) {
+  const srcDb = config.source.database;
+  const tgtDb = config.target.database;
+  console.log(`\n=== Estados recientes (prod.updated últimas ${hours}h) ===`);
+
+  const [prodRows] = await withSource((c) =>
+    c.query(
+      `SELECT idLead, leadStatus, updated
+       FROM \`${srcDb}\`.tblLeads
+       WHERE updated >= DATE_SUB(NOW(), INTERVAL ? HOUR)
+       ORDER BY updated DESC`,
+      [hours]
+    )
+  );
+  console.log(`  prod actualizados: ${prodRows.length}`);
+  if (!prodRows.length) return;
+
+  let match = 0;
+  let mismatch = 0;
+  let missing = 0;
+  const samples = [];
+  const BATCH = 2000;
+
+  for (let i = 0; i < prodRows.length; i += BATCH) {
+    const chunk = prodRows.slice(i, i + BATCH);
+    const ids = chunk.map((r) => r.idLead);
+    const ph = ids.map(() => '?').join(',');
+    const [normRows] = await withTarget((c) =>
+      c.query(
+        `SELECT COALESCE(l.glide_id, l.id_lead) AS glide_key, l.id_lead,
+                rls.leadStatus, l.updated_at
+         FROM \`${tgtDb}\`.\`lead\` l
+         LEFT JOIN refLeadStatus rls ON rls.idLeadStatus = l.id_lead_status
+         WHERE COALESCE(l.glide_id, l.id_lead) IN (${ph})`,
+        ids
+      )
+    );
+    const normMap = new Map(normRows.map((r) => [Number(r.glide_key), r]));
+    for (const p of chunk) {
+      const n = normMap.get(Number(p.idLead));
+      if (!n) {
+        missing++;
+        continue;
+      }
+      if (normStr(p.leadStatus) === normStr(n.leadStatus)) match++;
+      else {
+        mismatch++;
+        if (samples.length < 15) {
+          samples.push({
+            glide_id: p.idLead,
+            id_lead: n.id_lead,
+            prod: p.leadStatus,
+            norm: n.leadStatus,
+            prodUpdated: p.updated,
+            normUpdated: n.updated_at,
+          });
+        }
+      }
+    }
+  }
+
+  console.log(`  status OK: ${match}  mismatch: ${mismatch}  sin fila en norm: ${missing}`);
+  if (samples.length) {
+    console.log('  samples mismatch:');
+    for (const s of samples) {
+      console.log(
+        `    glide=${s.glide_id} local=${s.id_lead} | "${s.prod}" → norm "${s.norm}" | prod.upd=${s.prodUpdated}`
+      );
+    }
+  } else if (mismatch === 0 && missing === 0) {
+    console.log('  ✓ Estados recientes alineados');
   }
 }
 
@@ -189,6 +296,7 @@ async function main() {
 
   await countAudit();
   await valueAudit(range, opts.sample);
+  await recentStatusAudit(opts.hours);
 
   if (range) {
     const srcDb = config.source.database;

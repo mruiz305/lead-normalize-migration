@@ -6,8 +6,9 @@
  *   1) sync:ref-attorney
  *   2) sync:users (g_users → app_user por email)
  *   3) sync:incremental
- *   4) backfill:attorney-miss
- *   5) sync:lead-comments -- --resume
+ *   4) migrate:gaps (src sin lead)
+ *   5) backfill:attorney-miss
+ *   6) sync:lead-comments -- --resume
  *
  * El datamart ETL es independiente (su propio cron: ETL_DM_CRON).
  *
@@ -80,6 +81,7 @@ function plan(opts) {
     if (opts.since) leadArgs.push('--since', opts.since);
     if (opts.hours) leadArgs.push('--hours', String(opts.hours));
     steps.push({ script: 'sync:incremental', args: leadArgs });
+    steps.push({ script: 'migrate:gaps', args: [] });
   }
   if (!opts.skipBackfill) steps.push({ script: 'backfill:attorney-miss', args: [] });
   if (!opts.skipComments) {

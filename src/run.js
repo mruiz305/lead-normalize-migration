@@ -38,8 +38,8 @@ Pasos:
 
 Opciones migrate:
   --limit N       Máximo N leads en esta corrida (MIG_LIMIT en .env)
-  --resume        Continúa donde quedó (idLead > MAX destino). No trunca destino.
-  --from-id N     Migrar solo idLead > N (avanzado; normalmente usa --resume)
+  --resume        Continúa donde quedó (idLead > MAX(glide_id)). No trunca destino.
+  --from-id N     Migrar solo idLead Glide > N (avanzado; normalmente usa --resume)
   --dry-run       No escribe en destino
 
 Migración por partes (ejemplo):

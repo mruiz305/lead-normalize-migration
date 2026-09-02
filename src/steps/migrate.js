@@ -113,7 +113,7 @@ async function runMigrate({ dryRun = false, limit = null, resume = false, fromId
   console.log(`  Destino: ${config.target.host}/${config.target.database}`);
   console.log(`  Lote:    ${BATCH_SIZE} filas`);
   if (incremental) {
-    console.log(`  Modo:    incremental${resume ? ' (--resume)' : ''}${fromId != null ? ` desde idLead > ${fromId}` : ''}`);
+    console.log(`  Modo:    incremental${resume ? ' (--resume)' : ''}${fromId != null ? ` desde idLead Glide > ${fromId}` : ''}`);
   }
   if (effectiveLimit) {
     console.log(`  Límite:  ${effectiveLimit} leads en esta corrida`);
@@ -162,7 +162,7 @@ async function runMigrate({ dryRun = false, limit = null, resume = false, fromId
 
     console.log('Paso 2: ref_insurance_carrier (refInsurance prod → PIP + AT_FAULT)…');
     if (incremental && resumeAfterId > 0) {
-      console.log(`  (solo idLead > ${resumeAfterId})`);
+      console.log(`  (solo idLead Glide > ${resumeAfterId}; watermark=MAX(glide_id))`);
     }
     await syncInsuranceCatalog(sourceConn, targetConn, {
       truncate: !incremental,

@@ -37,10 +37,13 @@ async function runStatus() {
       const leadCount = await countRows(conn, config.target.database, 'lead');
       console.log(`[destino] lead: ${leadCount} filas`);
       const [[wm]] = await conn.query(
-        `SELECT COALESCE(MAX(id_lead), 0) AS maxId FROM \`${config.target.database}\`.\`lead\``
+        `SELECT COALESCE(MAX(id_lead), 0) AS maxId,
+                COALESCE(MAX(glide_id), 0) AS maxGlide
+         FROM \`${config.target.database}\`.\`lead\``
       );
       if (leadCount > 0) {
         console.log(`[destino] lead MAX(id_lead): ${wm.maxId}`);
+        console.log(`[destino] lead MAX(glide_id): ${wm.maxGlide} (watermark --resume)`);
       }
       console.log(`[destino] client: ${await countRows(conn, config.target.database, 'client')} filas`);
       const hmTable = await tableExists(conn, config.target.database, 'hierarchy_membership');
@@ -79,13 +82,13 @@ async function runStatus() {
             const leadTable = await tableExists(tgtConn, config.target.database, 'lead');
             if (!leadTable) return;
             const [[{ maxId }]] = await tgtConn.query(
-              `SELECT COALESCE(MAX(id_lead), 0) AS maxId FROM \`${config.target.database}\`.\`lead\``
+              `SELECT COALESCE(MAX(glide_id), 0) AS maxId FROM \`${config.target.database}\`.\`lead\``
             );
             const [[{ pending }]] = await conn.query(
               `SELECT COUNT(*) AS pending FROM \`${config.source.database}\`.tblLeads WHERE idLead > ?`,
               [maxId]
             );
-            console.log(`[migración] pendientes (idLead > ${maxId}): ${pending} de ${srcTotal}`);
+            console.log(`[migración] pendientes (idLead > MAX(glide_id)=${maxId}): ${pending} de ${srcTotal}`);
           });
         }
       }

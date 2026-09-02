@@ -9,7 +9,7 @@ const TBLLEADS_COLUMN_GROUPS = [
     title: 'Núcleo del caso',
     subtitle: 'Metadatos, estado, flags e IDs legacy',
     rows: [
-      ['idLead', 'lead.id_lead', 'PK preservada'],
+      ['idLead', 'lead.id_lead (+ lead.glide_id en migración)', 'PK local; glide_id=idLead histórico / puente Glide'],
       ['leadStatus', 'lead.id_lead_status → refLeadStatus', 'Texto → FK'],
       ['stage', 'lead.id_stage → ref_lead_stage', 'Texto → FK'],
       ['officeLabel', 'lead.id_company_office + lead_org_snapshot.office_code', 'Código → FK catálogo'],

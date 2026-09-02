@@ -91,15 +91,18 @@ async function preview(since) {
   });
   await withTarget(async (conn) => {
     const [[wm]] = await conn.query(
-      `SELECT COALESCE(MAX(id_lead),0) maxId, COUNT(*) c FROM \`${db}\`.\`lead\``
+      `SELECT COALESCE(MAX(id_lead),0) maxId,
+              COALESCE(MAX(glide_id),0) maxGlide,
+              COUNT(*) c
+       FROM \`${db}\`.\`lead\``
     );
-    console.log(`  modelo actual: ${wm.c} leads (max ${wm.maxId})`);
+    console.log(`  modelo actual: ${wm.c} leads (max id_lead ${wm.maxId}, max glide_id ${wm.maxGlide})`);
     try {
       const [[n]] = await conn.query(
         `SELECT COUNT(*) c FROM \`${db}\`.tblLeads_src WHERE idLead > ?`,
-        [wm.maxId]
+        [wm.maxGlide]
       );
-      console.log(`  staging ids nuevos (>$max): ${n.c}`);
+      console.log(`  staging ids Glide nuevos (>max glide_id): ${n.c}`);
     } catch (_) {}
   });
 }

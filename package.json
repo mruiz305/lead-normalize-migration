@@ -24,6 +24,8 @@
     "migrate:sample": "node src/run.js migrate --limit 500",
     "migrate:chunk": "node src/run.js migrate --limit 20000",
     "migrate:resume": "node src/run.js migrate --resume",
+    "migrate:gaps": "node scripts/migrate-gaps.js",
+    "patch:lead-glide-id": "node scripts/apply-lead-glide-id.js",
     "remigrate:year": "node scripts/remigrate-leads-year.js",
     "remigrate:updated": "node scripts/remigrate-leads-updated.js",
     "backfill:attorney-miss": "node scripts/backfill-attorney-catalog-miss.js",
