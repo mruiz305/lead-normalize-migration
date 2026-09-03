@@ -46,6 +46,7 @@ SELECT
   CAST(NULL AS CHAR) AS cbLeadName,
   CAST(NULL AS CHAR) AS cbLeadPhone,
   o.office_code AS office,
+  so.sub_office_code AS SubOffice,
   CAST(NULL AS SIGNED) AS parametersViewIsConfirmed,
   CAST(NULL AS CHAR) AS dubCheck1,
   CAST(NULL AS CHAR) AS parametersHomeList,
@@ -101,13 +102,13 @@ SELECT
   CAST(NULL AS DATETIME) AS `T&CTimestamp`,
   CAST(NULL AS SIGNED) AS `signedtoT&C`,
   CAST(NULL AS CHAR) AS rosterlastmonthFile,
-  CAST(NULL AS CHAR) AS SubOffice,
   CAST(NULL AS CHAR) AS Address
 FROM app_user u
 LEFT JOIN ref_job_title jt ON jt.job_title_id = u.id_job_title
 LEFT JOIN ref_rank rk ON rk.rank_id = u.id_rank
 LEFT JOIN ref_department dept ON dept.department_id = u.id_department
 LEFT JOIN ref_company_office o ON o.id_company_office = u.id_company_office
+LEFT JOIN ref_sub_office so ON so.id_sub_office = u.id_sub_office
 LEFT JOIN (
   SELECT
     hm.user_id,
@@ -273,3 +274,21 @@ FROM lead_status_event e
 INNER JOIN `lead` l ON l.id_lead = e.id_lead
 LEFT JOIN refLeadStatus rls ON rls.idLeadStatus = e.id_status_to
 WHERE e.status_domain = 'LEAD';
+
+-- ---------------------------------------------------------------------------
+-- vIntakeSpecialistTestFilterDashboard — lista estática de emails de prueba
+-- (prod: UNION fijo). ETL → stg_*; SPs dmLeadsNew / roster user excluyen estos.
+-- ---------------------------------------------------------------------------
+DROP VIEW IF EXISTS vIntakeSpecialistTestFilterDashboard;
+CREATE VIEW vIntakeSpecialistTestFilterDashboard AS
+SELECT email FROM (
+  SELECT 'aarboleda@305nofault.com' AS email
+  UNION ALL SELECT 'creyes@305nofault.com'
+  UNION ALL SELECT 'jwazar@305nofault.com'
+  UNION ALL SELECT 'mpomares@305nofault.com'
+  UNION ALL SELECT 'reptnfg4@gmail.com'
+  UNION ALL SELECT 'ccajin@305nofault.com'
+  UNION ALL SELECT 'christiand@305nofault.com'
+  UNION ALL SELECT 'miodrag.zivanovic@toptal.com'
+  UNION ALL SELECT 'mruiz@305nofault.com'
+) t1;

@@ -17,6 +17,7 @@ const G_USERS_COLUMN_GROUPS = [
       ['title', 'app_user.id_job_title → ref_job_title', 'Texto → FK'],
       ['systemAccessLevel', 'app_user.access_level', ''],
       ['office', 'app_user.id_company_office → ref_company_office', 'Código oficina → FK'],
+      ['SubOffice', 'app_user.id_sub_office → ref_sub_office', 'Plaza/mercado → FK (catálogo propio)'],
       ['systemDepartment', 'app_user.id_department → ref_department', 'Texto → FK'],
       ['rank', 'app_user.id_rank → ref_rank', 'Texto → FK'],
       ['picture', 'app_user.picture', ''],

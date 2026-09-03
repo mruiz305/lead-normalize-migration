@@ -53,6 +53,14 @@ async function main() {
       }
       if (!dryRun) {
         console.log(`  app_user:    ${stats.beforeCount} → ${stats.afterCount}`);
+        if (stats.subOfficeCatalog) {
+          console.log(
+            `  ref_sub_office: ${stats.subOfficeCatalog.sourceDistinct} códigos prod` +
+              (stats.subOfficeCatalog.inserted
+                ? ` (+${stats.subOfficeCatalog.inserted} nuevos)`
+                : ' (sin altas)')
+          );
+        }
       }
 
       if (dryRun) {

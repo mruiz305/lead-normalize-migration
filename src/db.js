@@ -1,8 +1,8 @@
 const mysql = require('mysql2/promise');
 const config = require('./config');
 
-function createPool(dbConfig) {
-  return mysql.createPool({
+function createPool(dbConfig, { jsonAsString = false } = {}) {
+  const opts = {
     host: dbConfig.host,
     port: dbConfig.port,
     user: dbConfig.user,
@@ -11,12 +11,19 @@ function createPool(dbConfig) {
     waitForConnections: true,
     connectionLimit: 5,
     multipleStatements: true,
-  });
+  };
+  if (jsonAsString) {
+    opts.typeCast = (field, next) => {
+      if (field.type === 'JSON') return field.string('utf8');
+      return next();
+    };
+  }
+  return mysql.createPool(opts);
 }
 
 const targetPool = createPool(config.target);
 const sourcePool = config.hasSeparateSource
-  ? createPool(config.source)
+  ? createPool(config.source, { jsonAsString: true })
   : targetPool;
 const securityPool = config.security ? createPool(config.security) : null;
 const identityPool = config.identity ? createPool(config.identity) : null;

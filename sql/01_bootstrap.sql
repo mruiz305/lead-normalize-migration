@@ -109,6 +109,17 @@ CREATE TABLE ref_company_office (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='Oficinas con ID estable; nombres solo aquí';
 
+CREATE TABLE ref_sub_office (
+  id_sub_office int NOT NULL AUTO_INCREMENT,
+  sub_office_code varchar(50) NOT NULL COMMENT 'Valor canónico g_users.SubOffice (trim)',
+  display_name varchar(100) DEFAULT NULL COMMENT 'Nombre legible (default = code)',
+  is_active tinyint(1) NOT NULL DEFAULT 1,
+  synced_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id_sub_office),
+  UNIQUE KEY uk_ref_sub_office_code (sub_office_code)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='Plaza/mercado SubOffice (no es oficina operativa)';
+
 CREATE TABLE ref_department (
   department_id int NOT NULL COMMENT 'departments.department_id',
   department_name varchar(100) NOT NULL,
@@ -515,6 +526,7 @@ CREATE TABLE app_user (
   id_job_title int DEFAULT NULL COMMENT 'g_users.title → FK ref_job_title',
   access_level varchar(100) DEFAULT NULL COMMENT 'g_users.systemAccessLevel — rol app legacy',
   id_company_office int DEFAULT NULL COMMENT 'Oficina actual — FK catálogo',
+  id_sub_office int DEFAULT NULL COMMENT 'g_users.SubOffice → FK ref_sub_office',
   id_department int DEFAULT NULL COMMENT 'g_users.systemDepartment → FK ref_department',
   id_rank int DEFAULT NULL COMMENT 'g_users.rank → FK ref_rank',
   picture text DEFAULT NULL COMMENT 'g_users.picture',
@@ -541,11 +553,13 @@ CREATE TABLE app_user (
   PRIMARY KEY (id_user),
   UNIQUE KEY uk_app_user_email (email),
   KEY idx_app_user_company_office (id_company_office),
+  KEY idx_app_user_sub_office (id_sub_office),
   KEY idx_app_user_department (id_department),
   KEY idx_app_user_rank (id_rank),
   KEY idx_app_user_job_title (id_job_title),
   KEY idx_app_user_paylocity_id (paylocity_id),
   CONSTRAINT fk_app_user_company_office FOREIGN KEY (id_company_office) REFERENCES ref_company_office (id_company_office),
+  CONSTRAINT fk_app_user_sub_office FOREIGN KEY (id_sub_office) REFERENCES ref_sub_office (id_sub_office),
   CONSTRAINT fk_app_user_department FOREIGN KEY (id_department) REFERENCES ref_department (department_id),
   CONSTRAINT fk_app_user_rank FOREIGN KEY (id_rank) REFERENCES ref_rank (rank_id),
   CONSTRAINT fk_app_user_job_title FOREIGN KEY (id_job_title) REFERENCES ref_job_title (job_title_id)

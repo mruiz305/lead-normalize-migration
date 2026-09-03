@@ -18,11 +18,16 @@ const {
   loadJobTitleMapByName,
   resolveJobTitleId,
 } = require('./userHrCatalog');
+const {
+  loadSubOfficeMapByCode,
+  resolveSubOfficeId,
+  ensureSubOfficeCatalogFromGUsers,
+} = require('./subOfficeCatalog');
 
 const BATCH_SIZE = 200;
 
 const G_USER_SELECT = `
-  id, rowId, name, email, phone, title, systemAccessLevel, office,
+  id, rowId, name, email, phone, title, systemAccessLevel, office, SubOffice,
   systemDepartment, \`rank\`, picture, hrEeType, dob,
   hrDealAmount, hrBudget, boostBudget, managementPay,
   DealGoal, DealGoalCustom, hrDealGoal, paylocityId,
@@ -53,7 +58,14 @@ async function loadCatalogMaps(targetConn) {
   const deptByName = await loadDepartmentMapByName(targetConn);
   const rankByName = await loadRankMapByName(targetConn);
   const titleByName = await loadJobTitleMapByName(targetConn);
-  return { resolveCompanyOfficeId, deptByName, rankByName, titleByName };
+  const subOfficeByCode = await loadSubOfficeMapByCode(targetConn);
+  return {
+    resolveCompanyOfficeId,
+    deptByName,
+    rankByName,
+    titleByName,
+    subOfficeByCode,
+  };
 }
 
 function rowToParams(r, maps) {
@@ -67,6 +79,7 @@ function rowToParams(r, maps) {
     resolveJobTitleId(r.title, maps.titleByName),
     r.systemAccessLevel,
     maps.resolveCompanyOfficeId(r.office),
+    resolveSubOfficeId(r.SubOffice, maps.subOfficeByCode),
     resolveDepartmentId(r.systemDepartment, maps.deptByName),
     resolveRankId(r.rank, maps.rankByName),
     r.picture ?? null,
@@ -93,7 +106,7 @@ function rowToParams(r, maps) {
 
 const INSERT_COLUMNS = `
   id_user, legacy_row_id, display_name, email, phone, id_job_title, access_level,
-  id_company_office, id_department, id_rank, picture, hr_ee_type, dob,
+  id_company_office, id_sub_office, id_department, id_rank, picture, hr_ee_type, dob,
   hr_deal_amount, hr_budget, boost_budget, management_pay,
   hr_deal_goal, hr_deal_goal_custom, paylocity_id,
   hr_status, hired_at, termed_at, is_active,
@@ -108,6 +121,7 @@ const UPDATE_ASSIGNMENTS = `
   id_job_title = VALUES(id_job_title),
   access_level = VALUES(access_level),
   id_company_office = VALUES(id_company_office),
+  id_sub_office = VALUES(id_sub_office),
   id_department = VALUES(id_department),
   id_rank = VALUES(id_rank),
   picture = VALUES(picture),
@@ -133,7 +147,7 @@ const UPDATE_ASSIGNMENTS = `
 `;
 
 const ROW_PLACEHOLDER =
-  '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+  '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
 
 async function loadGUsersRows(sourceConn) {
   const src = config.source.database;
@@ -188,7 +202,15 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
     }
   }
 
+  let subOfficeCatalog = { sourceDistinct: 0, inserted: 0 };
+  if (!dryRun) {
+    subOfficeCatalog = await ensureSubOfficeCatalogFromGUsers(sourceConn, targetConn);
+  }
   const maps = await loadCatalogMaps(targetConn);
+  if (!dryRun) {
+    maps.subOfficeByCode = await loadSubOfficeMapByCode(targetConn);
+  }
+
   const sqlHead = `
     INSERT INTO \`${tgt}\`.app_user (${INSERT_COLUMNS})
     VALUES
@@ -232,6 +254,7 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
     upserted: dryRun ? 0 : upserted,
     beforeCount: Number(beforeCount),
     afterCount: dryRun ? Number(beforeCount) : Number(afterCount),
+    subOfficeCatalog,
   };
 }
 
