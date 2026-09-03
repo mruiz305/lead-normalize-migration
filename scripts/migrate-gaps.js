@@ -17,7 +17,6 @@ const {
   transformLead,
   flushLeadBatch,
 } = require('../src/migration/pipeline');
-const { populateHierarchyMembership } = require('../src/migration/hierarchyMembership');
 const { syncInsuranceCatalog } = require('../src/migration/insurance');
 const { syncAtFaultTypeCatalog } = require('../src/migration/atFaultTypeCatalog');
 const { seedAccidentLocationTypes } = require('../src/migration/accidentLocationTypeCatalog');
@@ -124,8 +123,8 @@ async function main() {
       console.log(`  migrados ${migrated}/${cap} (hasta ${cursor})`);
     }
 
-    console.log('populateHierarchyMembership…');
-    await populateHierarchyMembership(sourceConn, conn, { truncate: false });
+    // hierarchy_membership ya se refresca en sync:users / migrate:resume del mismo ciclo;
+    // no reinsertar aquí (truncate:false → ER_DUP_ENTRY).
 
     const [[{ remaining }]] = await conn.query(
       `SELECT COUNT(*) AS remaining
