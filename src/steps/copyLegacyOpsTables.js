@@ -8,6 +8,8 @@ const LEGACY_OPS_TABLES = [
   'tblCron',
   'tblCronConfig',
   'tblLeadConflictCase',
+  // Archive histórico (datamart ETL → stg_tblLeadsLogsDuplicateArchiveJun2025)
+  'tblLeadsLogsDuplicateArchiveJun2025',
 ];
 
 const DEFAULT_BATCH = Number(process.env.MIG_LEGACY_OPS_BATCH_SIZE || 5000);

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/** Copia idéntica prod → TNFG_INTAKE: tbl_tmp_all_cases_report, rep_machine_output, tblCron, tblCronConfig, tblLeadConflictCase */
+/** Copia idéntica prod → TNFG_INTAKE: reportes ops, cron, conflict case, archive duplicados Jun2025 */
 
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const { closeAll } = require('../src/db');
