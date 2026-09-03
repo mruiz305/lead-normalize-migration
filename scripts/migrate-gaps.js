@@ -10,7 +10,7 @@
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const config = require('../src/config');
-const { withTarget, closeAll } = require('../src/db');
+const { withTarget, withSource, closeAll } = require('../src/db');
 const { loadCatalogMaps } = require('../src/migration/maps');
 const {
   LEAD_SELECT_COLUMNS,
@@ -47,6 +47,7 @@ async function main() {
   console.log(`  Modo:    ${opts.dryRun ? 'dry-run' : 'migrate'}\n`);
 
   await withTarget(async (conn) => {
+    await withSource(async (sourceConn) => {
     await conn.query(`DROP TEMPORARY TABLE IF EXISTS ${TMP}`);
     await conn.query(`
       CREATE TEMPORARY TABLE ${TMP} (
@@ -83,11 +84,11 @@ async function main() {
 
     console.log('Cargando catálogos…');
     const maps = await loadCatalogMaps(conn);
-    await syncInsuranceCatalog(conn);
-    await syncAtFaultTypeCatalog(conn);
+    await syncInsuranceCatalog(sourceConn, conn, { truncate: false, afterId: 0 });
+    await syncAtFaultTypeCatalog(sourceConn, conn, { truncate: false });
     await seedAccidentLocationTypes(conn);
     await seedSeverityLevels(conn);
-    await syncInjurySiteCatalog(conn);
+    await syncInjurySiteCatalog(sourceConn, conn, { truncate: false });
 
     const colList = LEAD_SELECT_COLUMNS.map((c) => `\`${c}\``).join(', ');
     const cap =
@@ -124,7 +125,7 @@ async function main() {
     }
 
     console.log('populateHierarchyMembership…');
-    await populateHierarchyMembership(conn);
+    await populateHierarchyMembership(sourceConn, conn, { truncate: false });
 
     const [[{ remaining }]] = await conn.query(
       `SELECT COUNT(*) AS remaining
@@ -133,6 +134,7 @@ async function main() {
        WHERE l.id_lead IS NULL`
     );
     console.log(`\n✓ Migrados ${migrated}. Gaps restantes en src: ${remaining}`);
+    });
   });
 }
 
