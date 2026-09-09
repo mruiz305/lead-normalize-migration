@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Sync g_users → app_user (llave: email).
- * Prod: ~4075 filas g_users → ~4051 app_user (dedupe por email, fila canónica).
+ * Sync g_users → app_user (llave: rowId / legacy_row_id).
+ * Una fila app_user por Glide rowId. Email se actualiza; no decide alta/edición.
  *
  * Uso:
  *   npm run sync:users
@@ -30,7 +30,7 @@ async function main() {
   const skipHierarchy = process.argv.includes('--skip-hierarchy');
   const skipChannels = process.argv.includes('--skip-channels');
 
-  console.log('sync:users — g_users → app_user (email)');
+  console.log('sync:users — g_users → app_user (rowId)');
   console.log(`  Origen:  ${config.source.host}/${config.source.database}`);
   console.log(`  Destino: ${config.target.host}/${config.target.database}`);
   console.log(`  Modo:    ${dryRun ? 'dry-run' : 'LIVE'}`);
@@ -44,10 +44,19 @@ async function main() {
         dryRun,
         activeOnlyInserts,
       });
-      console.log(`  g_users filas:     ${stats.sourceRows} (${stats.duplicateEmails} duplicadas por email)`);
-      console.log(`  → app_user target: ${stats.canonical} emails canónicos (${stats.activeCanonical} Active)`);
-      console.log(`  nuevos (Active):   ${stats.inserted}`);
+      console.log(`  g_users filas:     ${stats.sourceRows} (${stats.duplicateRowIds} rowId duplicados)`);
+      console.log(`  → app_user target: ${stats.canonical} por rowId (${stats.activeCanonical} Active)`);
+      console.log(`  nuevos:            ${stats.inserted}`);
       console.log(`  actualizados:      ${stats.updated}`);
+      if (stats.skippedNoEmail) {
+        console.log(`  omitidos (sin email): ${stats.skippedNoEmail}`);
+      }
+      if (stats.remappedIds) {
+        console.log(`  id_user reasignados (PK ocupada): ${stats.remappedIds}`);
+      }
+      if (stats.schema?.changes?.length) {
+        console.log(`  schema:            ${stats.schema.changes.join(', ')}`);
+      }
       if (stats.skippedTermedNew) {
         console.log(`  omitidos (Termed nuevos): ${stats.skippedTermedNew}`);
       }

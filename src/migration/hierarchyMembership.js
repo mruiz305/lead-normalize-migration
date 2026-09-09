@@ -28,6 +28,8 @@ async function loadGUsers(sourceConn) {
   const srcDb = config.source.database;
   const [rows] = await sourceConn.query(`
     SELECT
+      id,
+      rowId,
       email,
       office,
       hierarchyDirectorate,
@@ -38,7 +40,7 @@ async function loadGUsers(sourceConn) {
       hierarchyDuo,
       hrStatus
     FROM \`${srcDb}\`.g_users
-    WHERE email IS NOT NULL AND TRIM(email) <> ''
+    WHERE rowId IS NOT NULL AND TRIM(rowId) <> ''
   `);
   return rows;
 }
@@ -97,11 +99,18 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
   const officeByCode = await loadCompanyOfficeMap(targetConn);
 
   const [appUsers] = await targetConn.query(
-    `SELECT id_user, email, id_company_office FROM \`${tgtDb}\`.app_user WHERE is_active = 1`
+    `SELECT id_user, email, legacy_row_id, id_company_office
+     FROM \`${tgtDb}\`.app_user WHERE is_active = 1`
   );
+  const userById = new Map();
+  const userByRowId = new Map();
   const userByEmail = new Map();
   for (const u of appUsers) {
-    userByEmail.set(normEmail(u.email), u);
+    userById.set(Number(u.id_user), u);
+    const rid = u.legacy_row_id ? String(u.legacy_row_id).trim() : '';
+    if (rid) userByRowId.set(rid, u);
+    const em = normEmail(u.email);
+    if (em && !userByEmail.has(em)) userByEmail.set(em, u);
   }
 
   const gUsers = await loadGUsers(sourceConn);
@@ -118,6 +127,12 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
   function queue(userId, level, idCompanyOffice, leaderUserId, isLeader, isPrimary = 0) {
     if (!userId || !level) return;
     const leaderFlag = isLeader ? 1 : 0;
+    // At most one primary member row per user+level.
+    if (!leaderFlag && isPrimary) {
+      const primaryKey = `primary:${userId}:${level}`;
+      if (seen.has(primaryKey)) return;
+      seen.add(primaryKey);
+    }
     const key = `${userId}:${level}:${idCompanyOffice ?? ''}:${leaderUserId ?? ''}:${leaderFlag}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -127,8 +142,8 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
   let memberCount = 0;
   for (const gu of gUsers) {
     if (!isActiveHr(gu.hrStatus)) continue;
-    const email = normEmail(gu.email);
-    const appUser = userByEmail.get(email);
+    const rowId = gu.rowId ? String(gu.rowId).trim() : '';
+    const appUser = userById.get(Number(gu.id)) || (rowId ? userByRowId.get(rowId) : null);
     if (!appUser) continue;
 
     const idOffice =
@@ -143,26 +158,27 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     const leaderDirId = userByEmail.get(normEmail(gu.hierarchyDirectorate))?.id_user ?? null;
     const leaderRegId = userByEmail.get(normEmail(gu.hierarchyRegion))?.id_user ?? null;
 
+    // One OFFICE member row only (primary). Do NOT also queue a null-office duplicate —
+    // that made fetchSubmitterDetail LIMIT 1 nondeterministic and froze wrong org on create.
     if (idOffice) {
       queue(appUser.id_user, LEVEL.OFFICE, idOffice, leaderOfficeId, false, 1);
       memberCount += 1;
+    } else if (leaderOfficeId && leaderOfficeId !== appUser.id_user) {
+      queue(appUser.id_user, LEVEL.OFFICE, null, leaderOfficeId, false, 1);
+      memberCount += 1;
     }
 
+    // Other levels: single primary member row pointing at hierarchy* leader from g_users.
     const leaderByLevel = [
       [LEVEL.DIRECTORATE, leaderDirId],
       [LEVEL.REGION, leaderRegId],
-      [LEVEL.OFFICE, leaderOfficeId],
       [LEVEL.POD, leaderPodId],
       [LEVEL.TEAM, leaderTeamId],
       [LEVEL.DUO, leaderDuoId],
     ];
     for (const [level, leaderId] of leaderByLevel) {
       if (!leaderId || leaderId === appUser.id_user) continue;
-      if (level === LEVEL.OFFICE && idOffice) {
-        queue(appUser.id_user, level, null, leaderId, false, 0);
-      } else if (level !== LEVEL.OFFICE) {
-        queue(appUser.id_user, level, null, leaderId, false, 0);
-      }
+      queue(appUser.id_user, level, null, leaderId, false, 1);
     }
   }
 

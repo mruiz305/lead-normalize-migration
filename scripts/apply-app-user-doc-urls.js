@@ -28,16 +28,29 @@ async function main() {
         'utf8'
       );
       await targetConn.query(sql);
-      console.log('  ✓ columnas agregadas');
+      console.log('  ✓ columnas doc URLs agregadas');
     } else {
-      console.log('  · columnas ya existen');
+      console.log('  · columnas doc URLs base ya existen');
+    }
+
+    if (!(await columnExists(targetConn, db, 'roster_last_month_file_url'))) {
+      const sql = fs.readFileSync(
+        path.join(config.sqlDir, 'patches', 'add_app_user_roster_last_month_file.sql'),
+        'utf8'
+      );
+      await targetConn.query(sql);
+      console.log('  ✓ roster_last_month_file_url agregada');
+    } else {
+      console.log('  · roster_last_month_file_url ya existe');
     }
 
     await withSource(async (sourceConn) => {
       const { gUsers, updated, stats } = await syncUserDocUrlsFromGUsers(sourceConn, targetConn);
       console.log(`  ✓ g_users leídos: ${gUsers}`);
       console.log(`  ✓ app_user actualizados: ${updated}`);
-      console.log(`  ✓ con log: ${stats.with_log}, roster: ${stats.with_roster}, machine: ${stats.with_machine}`);
+      console.log(
+        `  ✓ con log: ${stats.with_log}, roster: ${stats.with_roster}, roster_last_month: ${stats.with_roster_last_month}, machine: ${stats.with_machine}`
+      );
       console.log(`  ✓ lead_sheet: ${stats.with_lead_sheet}, ind_lead_sheet: ${stats.with_ind_lead_sheet}`);
     });
   });

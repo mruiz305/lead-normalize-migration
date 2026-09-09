@@ -4,7 +4,7 @@
  *
  * Por defecto (vía sync:cron / CronManager):
  *   1) sync:ref-attorney
- *   2) sync:users (g_users → app_user por email)
+ *   2) sync:users (g_users → app_user por rowId)
  *   3) sync:incremental
  *   4) migrate:gaps (src sin lead)
  *   5) backfill:attorney-miss

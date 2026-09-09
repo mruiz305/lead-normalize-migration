@@ -56,7 +56,7 @@ async function copyTableData(
   targetConn,
   tableName,
   batchSize,
-  { pkMin = null, pkMax = null } = {},
+  { pkMin = null, pkMax = null, onDuplicateKeyNoop = false } = {},
 ) {
   const src = config.source.database;
   const tgt = config.target.database;
@@ -73,6 +73,10 @@ async function copyTableData(
   if ((pkMin != null || pkMax != null) && !pkCol) {
     throw new Error(`${tableName}: pkMin/pkMax requieren PRIMARY KEY de 1 columna`);
   }
+
+  const onDupSql = onDuplicateKeyNoop
+    ? ` ON DUPLICATE KEY UPDATE \`${pkCol}\`=\`${pkCol}\``
+    : '';
 
   let whereSql = '1=1';
   const whereParams = [];
@@ -168,7 +172,7 @@ async function copyTableData(
 
     try {
       await targetConn.query(
-        `INSERT INTO \`${tgt}\`.\`${tableName}\` (${colList}) VALUES ${valuesClause}`,
+        `INSERT INTO \`${tgt}\`.\`${tableName}\` (${colList}) VALUES ${valuesClause}${onDupSql}`,
         params,
       );
     } catch (err) {
@@ -213,6 +217,7 @@ async function runCopyLegacyOpsTables({
   skipRecreate = false,
   pkMin = null,
   pkMax = null,
+  onDuplicateKeyNoop = false,
 } = {}) {
   if (!config.hasSeparateSource) {
     console.log(
@@ -253,6 +258,7 @@ async function runCopyLegacyOpsTables({
         await copyTableData(sourceConn, targetConn, table, batchSize, {
           pkMin,
           pkMax,
+          onDuplicateKeyNoop,
         });
       }
       await targetConn.query('SET FOREIGN_KEY_CHECKS = 1');

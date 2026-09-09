@@ -29,6 +29,7 @@ async function main() {
   const dryRun = process.argv.includes('--dry-run');
   const only = parseOnlyTables(process.argv);
   const skipRecreate = process.argv.includes('--no-recreate');
+  const onDuplicateKeyNoop = process.argv.includes('--on-duplicate-key-noop');
   const pkMin = argNum('--pk-min');
   const pkMax = argNum('--pk-max');
   console.log(`Legacy ops tables (${dryRun ? 'dry-run' : 'copy'})…\n`);
@@ -36,6 +37,7 @@ async function main() {
     dryRun,
     only,
     skipRecreate,
+    onDuplicateKeyNoop,
     pkMin: Number.isFinite(pkMin) ? pkMin : null,
     pkMax: Number.isFinite(pkMax) ? pkMax : null,
   });

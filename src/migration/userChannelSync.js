@@ -84,15 +84,27 @@ async function syncUserChannelsFromGUsers(sourceConn, targetConn, { truncate = f
   }
 
   const [gUsers] = await sourceConn.query(`
-    SELECT id, email, phone, fbHandle, igHandle
+    SELECT id, rowId, email, phone, fbHandle, igHandle
     FROM \`${srcDb}\`.g_users
-    WHERE email IS NOT NULL AND TRIM(email) <> ''
+    WHERE rowId IS NOT NULL AND TRIM(rowId) <> ''
     ORDER BY id
   `);
 
+  const [appUsers] = await targetConn.query(
+    `SELECT id_user, legacy_row_id FROM \`${tgtDb}\`.app_user`
+  );
+  const idByRowId = new Map(
+    appUsers
+      .filter((u) => u.legacy_row_id)
+      .map((u) => [String(u.legacy_row_id).trim(), Number(u.id_user)])
+  );
+
   const channelRows = [];
   for (const row of gUsers) {
-    channelRows.push(...buildUserChannelRows(row, typeByCode));
+    const rowId = row.rowId ? String(row.rowId).trim() : '';
+    const idUser = idByRowId.get(rowId) ?? row.id;
+    if (!idUser) continue;
+    channelRows.push(...buildUserChannelRows({ ...row, id: idUser }, typeByCode));
   }
 
   const inserted = await bulkInsertUserChannels(targetConn, tgtDb, channelRows);

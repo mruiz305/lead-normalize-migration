@@ -237,6 +237,12 @@
               "comment": "g_users.rosterIndividualFile"
             },
             {
+              "name": "roster_last_month_file_url",
+              "type": "text",
+              "nullable": true,
+              "comment": "g_users.rosterlastmonthFile"
+            },
+            {
               "name": "machine_file_url",
               "type": "text",
               "nullable": true,
@@ -12020,6 +12026,11 @@
             "rosterIndividualFile",
             "app_user.roster_file_url",
             ""
+          ],
+          [
+            "rosterlastmonthFile",
+            "app_user.roster_last_month_file_url",
+            "URL roster mes anterior"
           ],
           [
             "machineIndividual",

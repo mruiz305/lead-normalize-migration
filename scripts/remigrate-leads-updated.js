@@ -3,6 +3,9 @@
  * Re-migra leads cuyo `updated` en staging/prod es >= --since.
  * Borra esos ids en el modelo normalizado y los vuelve a cargar desde tblLeads_src.
  *
+ * lead_org_snapshot se reconstruye desde columnas org de tblLeads
+ * (officeLabel, region, pod, team, duo…). No se toma de g_users.
+ *
  * Uso:
  *   npm run remigrate:updated -- --this-week --dry-run
  *   npm run remigrate:updated -- --since "2026-08-17 00:00:00"
@@ -20,7 +23,6 @@ const {
   transformLead,
   flushLeadBatch,
 } = require('../src/migration/pipeline');
-const { populateHierarchyMembership } = require('../src/migration/hierarchyMembership');
 const { syncInsuranceCatalog } = require('../src/migration/insurance');
 const { syncAtFaultTypeCatalog } = require('../src/migration/atFaultTypeCatalog');
 const { seedAccidentLocationTypes } = require('../src/migration/accidentLocationTypeCatalog');
@@ -231,7 +233,7 @@ async function main() {
     const sourceConn = await sourcePool.getConnection();
     try {
       console.log('Paso 2: catálogos / maps…');
-      await populateHierarchyMembership(sourceConn, targetConn, { truncate: true });
+      console.log('  org snapshot ← tblLeads (no g_users / hierarchy_membership)');
       await syncInsuranceCatalog(sourceConn, targetConn, { truncate: false, afterId: 0 });
       await seedAccidentLocationTypes(targetConn);
       await syncAtFaultTypeCatalog(sourceConn, targetConn, { truncate: false });

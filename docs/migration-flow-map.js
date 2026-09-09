@@ -26,7 +26,7 @@ const MIGRATION_SOURCES = [
     destinations: [
       { label: 'Núcleo del caso', tables: ['lead'], note: 'PK id_lead local; glide_id = puente Glide (histórico iguales)' },
       { label: 'Ciclo de vida', tables: ['lead_timeline', 'lead_status_event'], note: 'Fechas y cambios de status del lead' },
-      { label: 'Org congelada', tables: ['lead_org_snapshot'], note: 'Directorate → duo al momento de crear el caso' },
+      { label: 'Org del caso', tables: ['lead_org_snapshot'], note: 'Directorate → duo desde tblLeads; se refresca en remigrate, no desde g_users' },
       { label: 'Lesionado', tables: ['client', 'client_channel', 'client_address'], note: 'Persona principal del caso' },
       { label: 'Copasajeros', tables: ['lead_party', 'lead_party_injury_site'], note: 'Pasajeros psngr1…5' },
       { label: 'Accidente', tables: ['lead_accident'], note: 'Severidades, at-fault, datos del siniestro' },

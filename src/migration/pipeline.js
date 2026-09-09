@@ -375,6 +375,8 @@ function transformLead(l, maps) {
       leadId, l.dateCreated, l.dateCameIn, l.dateLockedDown, l.dateDropped, l.callbackDateTime,
       trimOrNull(l.reasonPending), trimOrNull(l.reasonDrop), trimOrNull(l.otherDropReason), l.lkaDate,
     ],
+    // Org del caso: solo columnas tblLeads (no hierarchy_membership / g_users).
+    // Si Glide cambia office/region/pod/team/duo en el lead, remigrate refresca este snapshot.
     orgSnapshot: [
       leadId,
       trimOrNull(l.directorate),

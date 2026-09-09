@@ -57,6 +57,7 @@ function rehireStats(stintCount) {
 
 const SOURCE_PERIOD_COLUMNS = `
   id,
+  rowId,
   email,
   hrStatus,
   hrHired,
@@ -68,7 +69,7 @@ async function loadSourcePeriods(sourceConn) {
   const [rows] = await sourceConn.query(`
     SELECT ${SOURCE_PERIOD_COLUMNS}
     FROM \`${srcDb}\`.g_users
-    WHERE email IS NOT NULL AND TRIM(email) <> ''
+    WHERE rowId IS NOT NULL AND TRIM(rowId) <> ''
     ORDER BY id
   `);
   return rows;
@@ -106,17 +107,20 @@ async function flushPeriods(targetConn, tgtDb, batch) {
   return inserted;
 }
 
-/** Sincroniza pasadas HR desde origen (agrupa por email → app_user). */
+/** Sincroniza pasadas HR desde origen (una app_user por rowId). */
 async function syncUserHrPeriod(sourceConn, targetConn, { truncate = true } = {}) {
   const tgtDb = config.target.database;
 
   const [users] = await targetConn.query(
-    `SELECT id_user, LOWER(TRIM(email)) AS email FROM \`${tgtDb}\`.app_user`
+    `SELECT id_user, legacy_row_id FROM \`${tgtDb}\`.app_user`
   );
-  const userByEmail = new Map(users.map((u) => [u.email, u.id_user]));
+  const userByRowId = new Map(
+    users
+      .filter((u) => u.legacy_row_id)
+      .map((u) => [String(u.legacy_row_id).trim(), u.id_user])
+  );
 
   const sourceRows = await loadSourcePeriods(sourceConn);
-  const byEmail = groupByEmail(sourceRows);
 
   if (truncate) {
     await targetConn.query('SET FOREIGN_KEY_CHECKS = 0');
@@ -128,16 +132,23 @@ async function syncUserHrPeriod(sourceConn, targetConn, { truncate = true } = {}
   let skipped = 0;
   let multiStint = 0;
 
-  for (const [email, emailRows] of byEmail) {
-    const idUser = userByEmail.get(email);
+  const byUser = new Map();
+  for (const row of sourceRows) {
+    const rowId = row.rowId ? String(row.rowId).trim() : '';
+    const idUser = rowId ? userByRowId.get(rowId) : null;
     if (!idUser) {
-      skipped += emailRows.length;
+      skipped += 1;
       continue;
     }
-    if (emailRows.length > 1) multiStint += 1;
+    if (!byUser.has(idUser)) byUser.set(idUser, []);
+    byUser.get(idUser).push(row);
+  }
 
-    const stints = buildStints(emailRows);
-    const canonical = pickCanonicalRow(emailRows);
+  for (const [idUser, userRows] of byUser) {
+    if (userRows.length > 1) multiStint += 1;
+
+    const stints = buildStints(userRows);
+    const canonical = pickCanonicalRow(userRows);
     for (const { row, stint_order } of stints) {
       const isCurrent = row.id === canonical?.id;
       if (!shouldInsertPeriod(row, isCurrent)) continue;
@@ -169,7 +180,7 @@ async function syncUserHrPeriod(sourceConn, targetConn, { truncate = true } = {}
       ` (${multiStint} personas con >1 pasada en origen, ${withRehire} con reingreso)`
   );
   if (skipped) {
-    console.log(`  ⚠ ${skipped} filas origen sin app_user (email no en destino)`);
+    console.log(`  ⚠ ${skipped} filas origen sin app_user (rowId no en destino)`);
   }
 
   return { inserted, multiStint, withRehire, skipped };

@@ -519,8 +519,9 @@ CREATE TABLE client_address (
 -- Usuarios (persona + HR + oficina). Jerarquía → hierarchy_membership.
 CREATE TABLE app_user (
   id_user int NOT NULL,
-  legacy_row_id varchar(250) DEFAULT NULL,
+  legacy_row_id varchar(250) DEFAULT NULL COMMENT 'g_users.rowId — llave de sync Glide',
   display_name varchar(100) DEFAULT NULL,
+  nick varchar(100) DEFAULT NULL COMMENT 'g_users.nick',
   email varchar(100) NOT NULL,
   phone varchar(20) DEFAULT NULL,
   id_job_title int DEFAULT NULL COMMENT 'g_users.title → FK ref_job_title',
@@ -546,12 +547,15 @@ CREATE TABLE app_user (
   is_active tinyint(1) NOT NULL DEFAULT 1,
   individual_log_url text DEFAULT NULL COMMENT 'g_users.logsIndividualFile',
   roster_file_url text DEFAULT NULL COMMENT 'g_users.rosterIndividualFile',
+  roster_last_month_file_url text DEFAULT NULL COMMENT 'g_users.rosterlastmonthFile',
   machine_file_url text DEFAULT NULL COMMENT 'g_users.machineIndividual',
   lead_sheet_url text DEFAULT NULL COMMENT 'g_users.leadSheetURL',
   individual_lead_sheet_url text DEFAULT NULL COMMENT 'g_users.individualLeadSheetURL',
+  referred_by varchar(150) DEFAULT NULL COMMENT 'g_users.Referred_By',
   synced_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (id_user),
-  UNIQUE KEY uk_app_user_email (email),
+  UNIQUE KEY uk_app_user_legacy_row_id (legacy_row_id),
+  KEY idx_app_user_email (email),
   KEY idx_app_user_company_office (id_company_office),
   KEY idx_app_user_sub_office (id_sub_office),
   KEY idx_app_user_department (id_department),
@@ -954,7 +958,7 @@ CREATE TABLE lead_org_snapshot (
   CONSTRAINT fk_org_snapshot_created_by FOREIGN KEY (created_by_user_id) REFERENCES app_user (id_user),
   CONSTRAINT fk_org_snapshot_updated_by FOREIGN KEY (updated_by_user_id) REFERENCES app_user (id_user)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='Snapshot org del lead al crear; texto legacy + leader user ids + id_company_office';
+  COMMENT='Org del lead según tblLeads (no g_users); remigrate refresca si el origen cambia';
 
 CREATE TABLE lead_party (
   id_lead_party int NOT NULL AUTO_INCREMENT,

@@ -70,10 +70,10 @@ const TBLLEADS_COLUMN_GROUPS = [
   },
   {
     id: 'org',
-    title: 'Organización congelada',
-    subtitle: 'lead_org_snapshot — org al momento de crear el caso',
+    title: 'Organización del caso (tblLeads)',
+    subtitle: 'lead_org_snapshot — org del lead, no la de g_users; remigrate la refresca si tblLeads cambia',
     rows: [
-      ['directorate', 'lead_org_snapshot.directorate', 'Texto congelado'],
+      ['directorate', 'lead_org_snapshot.directorate', 'Texto de tblLeads (no hierarchy_membership)'],
       ['directorateName', 'lead_org_snapshot.directorate_name', ''],
       ['region', 'lead_org_snapshot.region', ''],
       ['regionName', 'lead_org_snapshot.region_name', ''],

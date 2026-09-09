@@ -29,7 +29,7 @@ Pasos:
   status          Muestra conexión y estado de tablas (no modifica nada)
   bootstrap       Crea DDL + seeds en destino
   copy-catalogs   Copia catálogos prod (company, departments, ranks, attorney, …)
-  copy-users      Copia g_users → app_user (join por email en migrate)
+  copy-users      Copia g_users → app_user (upsert por rowId)
   truncate        Vacía tablas normalizadas (re-migración desde cero)
   migrate         Transforma tblLeads → modelo v2 (origen: solo SELECT)
   validate        Conteos y chequeos básicos

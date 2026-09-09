@@ -10,9 +10,10 @@ const G_USERS_COLUMN_GROUPS = [
     subtitle: 'copy-users → app_user',
     rows: [
       ['id', 'app_user.id_user', 'PK preservada (legacy id)'],
-      ['rowId', 'app_user.legacy_row_id', 'Glide rowID'],
+      ['rowId', 'app_user.legacy_row_id', 'UK de sync (Glide $rowID). Alta/edición por rowId, no por email'],
       ['name', 'app_user.display_name', ''],
-      ['email', 'app_user.email', 'UK; dedup por email → user_hr_period'],
+      ['nick', 'app_user.nick', 'Display alternativo'],
+      ['email', 'app_user.email', 'Se actualiza si cambia; no es llave de upsert'],
       ['phone', 'app_user.phone + user_channel PHONE_MOBILE', ''],
       ['title', 'app_user.id_job_title → ref_job_title', 'Texto → FK'],
       ['systemAccessLevel', 'app_user.access_level', ''],
@@ -26,6 +27,7 @@ const G_USERS_COLUMN_GROUPS = [
       ['hrStatus', 'app_user.hr_status', 'Vigente; pasadas en user_hr_period'],
       ['hrHired', 'app_user.hired_at', 'Pasada actual'],
       ['hrTermed', 'app_user.termed_at', 'Pasada actual'],
+      ['Referred_By', 'app_user.referred_by', 'Quién refirió al staff'],
     ],
   },
   {
@@ -96,6 +98,7 @@ const G_USERS_COLUMN_GROUPS = [
     rows: [
       ['logsIndividualFile', 'app_user.individual_log_url', ''],
       ['rosterIndividualFile', 'app_user.roster_file_url', ''],
+      ['rosterlastmonthFile', 'app_user.roster_last_month_file_url', 'URL roster mes anterior'],
       ['machineIndividual', 'app_user.machine_file_url', ''],
       ['leadSheetURL', 'app_user.lead_sheet_url', ''],
       ['individualLeadSheetURL', 'app_user.individual_lead_sheet_url', ''],
@@ -106,8 +109,7 @@ const G_USERS_COLUMN_GROUPS = [
     title: 'Sin migrar (baja prioridad o pendiente diseño)',
     subtitle: 'Estado Glide / UI — no copiados por copy-users',
     rows: [
-      ['nick', '—', 'Display alternativo (~2.8K)'],
-      ['systemKeyLeadLinker', '—', 'Integración linker (~2.8K)'],
+      ['systemKeyLeadLinker', '—', 'Constante Glide (1 valor en prod)'],
       ['mediaIdMedia', '—', 'Media perfil (~772)'],
       ['shift', '—', 'Preferencia UI'],
       ['chartsHideVisuals*', '—', 'Preferencias dashboard'],

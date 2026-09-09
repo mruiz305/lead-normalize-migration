@@ -3,6 +3,7 @@ const config = require('../config');
 const G_USER_DOC_FIELDS = [
   ['individual_log_url', 'logsIndividualFile'],
   ['roster_file_url', 'rosterIndividualFile'],
+  ['roster_last_month_file_url', 'rosterlastmonthFile'],
   ['machine_file_url', 'machineIndividual'],
   ['lead_sheet_url', 'leadSheetURL'],
   ['individual_lead_sheet_url', 'individualLeadSheetURL'],
@@ -54,6 +55,7 @@ async function syncUserDocUrlsFromGUsers(sourceConn, targetConn) {
     SELECT
       SUM(individual_log_url IS NOT NULL) AS with_log,
       SUM(roster_file_url IS NOT NULL) AS with_roster,
+      SUM(roster_last_month_file_url IS NOT NULL) AS with_roster_last_month,
       SUM(machine_file_url IS NOT NULL) AS with_machine,
       SUM(lead_sheet_url IS NOT NULL) AS with_lead_sheet,
       SUM(individual_lead_sheet_url IS NOT NULL) AS with_ind_lead_sheet

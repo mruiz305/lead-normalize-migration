@@ -13,7 +13,7 @@ SELECT
   u.id_user AS id,
   u.legacy_row_id AS rowId,
   u.display_name AS name,
-  CAST(NULL AS CHAR) AS nick,
+  u.nick,
   u.phone,
   u.email,
   u.picture,
@@ -72,6 +72,7 @@ SELECT
   u.dob,
   u.individual_log_url AS logsIndividualFile,
   u.roster_file_url AS rosterIndividualFile,
+  u.roster_last_month_file_url AS rosterlastmonthFile,
   u.management_pay AS managementPay,
   u.boost_budget AS boostBudget,
   CAST(NULL AS SIGNED) AS profileShowRole,
@@ -101,8 +102,8 @@ SELECT
   CAST(NULL AS SIGNED) AS `agreedtoT&C`,
   CAST(NULL AS DATETIME) AS `T&CTimestamp`,
   CAST(NULL AS SIGNED) AS `signedtoT&C`,
-  CAST(NULL AS CHAR) AS rosterlastmonthFile,
-  CAST(NULL AS CHAR) AS Address
+  CAST(NULL AS CHAR) AS Address,
+  u.referred_by AS Referred_By
 FROM app_user u
 LEFT JOIN ref_job_title jt ON jt.job_title_id = u.id_job_title
 LEFT JOIN ref_rank rk ON rk.rank_id = u.id_rank
