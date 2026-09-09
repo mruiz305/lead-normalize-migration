@@ -699,6 +699,24 @@ async function getResumeWatermark(targetConn) {
   return Number(row.maxId);
 }
 
+/** idLead ya presente como PK o glide_id (remigrate / portal). Resume no debe reinsertarlos. */
+async function existingSourceLeadIds(targetConn, ids) {
+  if (!ids.length) return new Set();
+  const db = config.target.database;
+  const ph = ids.map(() => '?').join(',');
+  const [rows] = await targetConn.query(
+    `SELECT id_lead, glide_id FROM \`${db}\`.\`lead\`
+     WHERE id_lead IN (${ph}) OR glide_id IN (${ph})`,
+    [...ids, ...ids]
+  );
+  const out = new Set();
+  for (const r of rows) {
+    if (r.id_lead != null) out.add(Number(r.id_lead));
+    if (r.glide_id != null) out.add(Number(r.glide_id));
+  }
+  return out;
+}
+
 async function runMigration(sourceConn, targetConn, maps, {
   batchSize = 200,
   limit = null,
@@ -743,10 +761,11 @@ async function runMigration(sourceConn, targetConn, maps, {
   }
 
   let migrated = 0;
+  let scanned = 0;
   let cursor = afterId;
 
-  while (migrated < cap) {
-    const take = Math.min(batchSize, cap - migrated);
+  while (scanned < cap) {
+    const take = Math.min(batchSize, cap - scanned);
     const [rows] = await leadsConn.query(
       `SELECT ${colList} FROM ${leadsSql}
        WHERE idLead > ? ORDER BY idLead LIMIT ?`,
@@ -754,18 +773,30 @@ async function runMigration(sourceConn, targetConn, maps, {
     );
     if (rows.length === 0) break;
 
-    const transformed = rows.map((row) => transformLead(row, maps));
-    await targetConn.beginTransaction();
-    try {
-      await flushLeadBatch(targetConn, transformed, maps);
-      await targetConn.commit();
-    } catch (err) {
-      await targetConn.rollback();
-      throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
+    const ids = rows.map((row) => Number(row.idLead));
+    const already = await existingSourceLeadIds(targetConn, ids);
+    const fresh = rows.filter((row) => !already.has(Number(row.idLead)));
+    const skipped = rows.length - fresh.length;
+    if (skipped) {
+      console.log(`  · skip ${skipped} ya en lead (tras idLead ${cursor})`);
     }
+
+    if (fresh.length) {
+      const transformed = fresh.map((row) => transformLead(row, maps));
+      await targetConn.beginTransaction();
+      try {
+        await flushLeadBatch(targetConn, transformed, maps);
+        await targetConn.commit();
+      } catch (err) {
+        await targetConn.rollback();
+        throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
+      }
+      migrated += fresh.length;
+    }
+
     cursor = rows[rows.length - 1].idLead;
-    migrated += rows.length;
-    if (onProgress) onProgress(migrated, cap);
+    scanned += rows.length;
+    if (onProgress) onProgress(scanned, cap);
   }
 
   return {
