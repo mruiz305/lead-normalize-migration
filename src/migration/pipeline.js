@@ -699,7 +699,7 @@ async function getResumeWatermark(targetConn) {
   return Number(row.maxId);
 }
 
-/** idLead ya presente como PK o glide_id (remigrate / portal). Resume no debe reinsertarlos. */
+/** idLead ya presente como PK o glide_id. */
 async function existingSourceLeadIds(targetConn, ids) {
   if (!ids.length) return new Set();
   const db = config.target.database;
@@ -715,6 +715,57 @@ async function existingSourceLeadIds(targetConn, ids) {
     if (r.glide_id != null) out.add(Number(r.glide_id));
   }
   return out;
+}
+
+const LEAD_CHILD_TABLES = [
+  'lead_insurance',
+  'lead_note',
+  'lead_staff',
+  'lead_sync_flag',
+  'lead_status_event',
+  'lead_injury_site',
+  'lead_injury',
+  'lead_accident',
+  'lead_legal',
+  'lead_clinical',
+  'lead_timeline',
+  'lead_org_snapshot',
+  'import_reject',
+];
+
+/** Borra un lead y sus hijos. Match por glide_id, si no id_lead (= idLead de origen). */
+async function deleteLeadGraphBySourceIds(conn, sourceIds) {
+  if (!sourceIds.length) return 0;
+  const db = config.target.database;
+  const ph = sourceIds.map(() => '?').join(',');
+  const match = `COALESCE(l.glide_id, l.id_lead) IN (${ph})`;
+
+  await conn.query(
+    `DELETE lpis FROM \`${db}\`.lead_party_injury_site lpis
+     INNER JOIN \`${db}\`.lead_party lp ON lp.id_lead_party = lpis.id_lead_party
+     INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
+     WHERE ${match}`,
+    sourceIds
+  );
+  await conn.query(
+    `DELETE lp FROM \`${db}\`.lead_party lp
+     INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
+     WHERE ${match}`,
+    sourceIds
+  );
+  for (const table of LEAD_CHILD_TABLES) {
+    await conn.query(
+      `DELETE c FROM \`${db}\`.\`${table}\` c
+       INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = c.id_lead
+       WHERE ${match}`,
+      sourceIds
+    );
+  }
+  const [rLead] = await conn.query(
+    `DELETE l FROM \`${db}\`.\`lead\` l WHERE ${match}`,
+    sourceIds
+  );
+  return Number(rLead.affectedRows || 0);
 }
 
 async function runMigration(sourceConn, targetConn, maps, {
@@ -775,24 +826,24 @@ async function runMigration(sourceConn, targetConn, maps, {
 
     const ids = rows.map((row) => Number(row.idLead));
     const already = await existingSourceLeadIds(targetConn, ids);
-    const fresh = rows.filter((row) => !already.has(Number(row.idLead)));
-    const skipped = rows.length - fresh.length;
-    if (skipped) {
-      console.log(`  · skip ${skipped} ya en lead (tras idLead ${cursor})`);
+    const refreshIds = ids.filter((id) => already.has(id));
+    if (refreshIds.length) {
+      console.log(`  · actualizar ${refreshIds.length} ya en lead (tras idLead ${cursor})`);
     }
 
-    if (fresh.length) {
-      const transformed = fresh.map((row) => transformLead(row, maps));
-      await targetConn.beginTransaction();
-      try {
-        await flushLeadBatch(targetConn, transformed, maps);
-        await targetConn.commit();
-      } catch (err) {
-        await targetConn.rollback();
-        throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
+    const transformed = rows.map((row) => transformLead(row, maps));
+    await targetConn.beginTransaction();
+    try {
+      if (refreshIds.length) {
+        await deleteLeadGraphBySourceIds(targetConn, refreshIds);
       }
-      migrated += fresh.length;
+      await flushLeadBatch(targetConn, transformed, maps);
+      await targetConn.commit();
+    } catch (err) {
+      await targetConn.rollback();
+      throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
     }
+    migrated += rows.length;
 
     cursor = rows[rows.length - 1].idLead;
     scanned += rows.length;

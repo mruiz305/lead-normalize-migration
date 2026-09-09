@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 /**
- * Re-migra leads cuyo `updated` en staging/prod es >= --since.
- * Borra esos ids en el modelo normalizado y los vuelve a cargar desde tblLeads_src.
+ * Re-migra leads cuyo `updated` es >= --since.
+ * Borra esos ids en el modelo y los vuelve a cargar.
+ *
+ * Origen:
+ *   default      TNFG_INTAKE.tblLeads_src
+ *   --from-prod  dbProduction.tblLeads
  *
  * lead_org_snapshot se reconstruye desde columnas org de tblLeads
  * (officeLabel, region, pod, team, duo…). No se toma de g_users.
  *
  * Uso:
+ *   npm run remigrate:updated -- --since "2026-09-08 00:00:00" --from-prod
  *   npm run remigrate:updated -- --this-week --dry-run
  *   npm run remigrate:updated -- --since "2026-08-17 00:00:00"
- *   npm run remigrate:updated -- --this-week
- *
- * Tip: antes conviene refrescar staging:
- *   npm run sync:tblLeads-src -- --since "2026-08-17 00:00:00"
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const config = require('../src/config');
@@ -31,6 +32,8 @@ const { syncInjurySiteCatalog } = require('../src/migration/injurySiteCatalog');
 
 const BATCH = Number(process.env.MIG_BATCH_SIZE || 100);
 const DEST_TABLE = process.env.MIG_SOURCE_LEADS_TABLE || 'tblLeads_src';
+const PROD_LEADS_TABLE = (process.env.MIG_PROD_LEADS_TABLE || 'tblLeads').trim();
+const ID_BATCH = 2000;
 const TMP = 'tmp_remigrate_updated_ids';
 
 function mondayOfThisWeek(d = new Date()) {
@@ -55,6 +58,7 @@ function parseArgs(argv) {
   }
   return {
     since,
+    fromProd: argv.includes('--from-prod'),
     dryRun: argv.includes('--dry-run'),
     deleteOnly: argv.includes('--delete-only'),
     skipDelete: argv.includes('--skip-delete'),
@@ -63,6 +67,54 @@ function parseArgs(argv) {
       return i >= 0 ? Number(argv[i + 1]) : null;
     })(),
   };
+}
+
+function leadsReadSql(fromProd) {
+  if (fromProd) {
+    return `\`${config.source.database}\`.\`${PROD_LEADS_TABLE}\``;
+  }
+  return `\`${config.target.database}\`.\`${DEST_TABLE}\``;
+}
+
+function applyFromProdSourceLeads() {
+  const database = config.source.database;
+  const table = PROD_LEADS_TABLE;
+  config.sourceLeads.table = table;
+  config.sourceLeads.database = database;
+  config.sourceLeads.onTarget = false;
+  config.sourceLeads.sql = `\`${database}\`.\`${table}\``;
+}
+
+async function collectIdsFromProd(sourceConn, targetConn, since) {
+  await targetConn.query(`DROP TEMPORARY TABLE IF EXISTS ${TMP}`);
+  await targetConn.query(`
+    CREATE TEMPORARY TABLE ${TMP} (
+      id_lead INT NOT NULL PRIMARY KEY
+    ) ENGINE=Memory
+  `);
+  const sql = leadsReadSql(true);
+  let lastId = 0;
+  let inserted = 0;
+  while (true) {
+    const [rows] = await sourceConn.query(
+      `SELECT idLead FROM ${sql}
+       WHERE updated >= ? AND idLead > ?
+       ORDER BY idLead
+       LIMIT ?`,
+      [since, lastId, ID_BATCH]
+    );
+    if (!rows.length) break;
+    const ids = rows.map((r) => Number(r.idLead));
+    const ph = ids.map(() => '(?)').join(',');
+    const [ins] = await targetConn.query(
+      `INSERT IGNORE INTO ${TMP} (id_lead) VALUES ${ph}`,
+      ids
+    );
+    inserted += Number(ins.affectedRows || 0);
+    lastId = ids[ids.length - 1];
+  }
+  const [[{ c }]] = await targetConn.query(`SELECT COUNT(*) AS c FROM ${TMP}`);
+  return { count: Number(c), inserted };
 }
 
 async function collectIds(conn, db, since) {
@@ -136,14 +188,13 @@ async function deleteCollected(conn, db) {
   return Number(rLead.affectedRows);
 }
 
-async function remigrateCollected(targetConn, maps, { limit = null, onProgress } = {}) {
+async function remigrateCollected(readConn, targetConn, maps, { limit = null, onProgress, fromProd = false } = {}) {
   const db = config.target.database;
   const colList = LEAD_SELECT_COLUMNS.map((c) => `\`${c}\``).join(', ');
+  const readSql = leadsReadSql(fromProd);
 
   const [[{ pendingTotal }]] = await targetConn.query(
-    `SELECT COUNT(*) AS pendingTotal
-     FROM \`${db}\`.\`${DEST_TABLE}\` s
-     INNER JOIN ${TMP} t ON t.id_lead = s.idLead`
+    `SELECT COUNT(*) AS pendingTotal FROM ${TMP}`
   );
   const cap = limit && limit > 0 ? Math.min(limit, pendingTotal) : pendingTotal;
   if (!cap) return { migrated: 0, total: 0, pendingTotal };
@@ -153,14 +204,16 @@ async function remigrateCollected(targetConn, maps, { limit = null, onProgress }
 
   while (migrated < cap) {
     const take = Math.min(BATCH, cap - migrated);
-    const [rows] = await targetConn.query(
-      `SELECT ${colList}
-       FROM \`${db}\`.\`${DEST_TABLE}\` s
-       INNER JOIN ${TMP} t ON t.id_lead = s.idLead
-       WHERE s.idLead > ?
-       ORDER BY s.idLead
-       LIMIT ?`,
+    const [idRows] = await targetConn.query(
+      `SELECT id_lead FROM ${TMP} WHERE id_lead > ? ORDER BY id_lead LIMIT ?`,
       [cursor, take]
+    );
+    if (!idRows.length) break;
+    const ids = idRows.map((r) => Number(r.id_lead));
+    const ph = ids.map(() => '?').join(',');
+    const [rows] = await readConn.query(
+      `SELECT ${colList} FROM ${readSql} WHERE idLead IN (${ph}) ORDER BY idLead`,
+      ids
     );
     if (!rows.length) break;
 
@@ -174,7 +227,7 @@ async function remigrateCollected(targetConn, maps, { limit = null, onProgress }
       throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
     }
 
-    cursor = rows[rows.length - 1].idLead;
+    cursor = ids[ids.length - 1];
     migrated += rows.length;
     if (onProgress) onProgress(migrated, cap);
   }
@@ -186,52 +239,65 @@ async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (!opts.since) {
     console.error(
-      'Uso: node scripts/remigrate-leads-updated.js --this-week | --since "YYYY-MM-DD HH:MM:SS" [--dry-run]'
+      'Uso: node scripts/remigrate-leads-updated.js --this-week | --since "YYYY-MM-DD HH:MM:SS" [--from-prod] [--dry-run]'
     );
     process.exit(1);
   }
+  if (opts.fromProd && !config.hasSeparateSource) {
+    console.error('--from-prod requiere MIG_SOURCE_* distinto de MIG_TARGET (dbProduction)');
+    process.exit(1);
+  }
+  if (opts.fromProd) {
+    applyFromProdSourceLeads();
+  }
 
   const db = config.target.database;
+  const originLabel = opts.fromProd
+    ? `${config.source.host}/${config.source.database}.${PROD_LEADS_TABLE}`
+    : `${config.target.host}/${db}.${DEST_TABLE}`;
   console.log('Remigrar leads actualizados');
   console.log(`  Destino: ${config.target.host}/${db}`);
-  console.log(`  Staging: ${db}.${DEST_TABLE}`);
+  console.log(`  Origen:  ${originLabel}${opts.fromProd ? ' (producción)' : ' (staging local)'}`);
   console.log(`  Filtro:  updated >= ${opts.since}`);
   console.log(`  Modo:    ${opts.dryRun ? 'dry-run' : opts.deleteOnly ? 'delete-only' : 'delete+reload'}\n`);
 
   await withTarget(async (targetConn) => {
-    const ids = await collectIds(targetConn, db, opts.since);
-    const [[inNorm]] = await targetConn.query(
-      `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
-       INNER JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)`
-    );
-    const [[keep]] = await targetConn.query(
-      `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
-       LEFT JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
-       WHERE t.id_lead IS NULL`
-    );
-
-    console.log(`IDs con updated >= since: ${ids.count}`);
-    console.log(`  ya en modelo (se rehacen): ${inNorm.c}`);
-    console.log(`  resto del modelo (intactos): ${keep.c}\n`);
-
-    if (opts.dryRun) {
-      console.log('(dry-run) no se borró ni migró nada');
-      return;
-    }
-
-    if (!opts.skipDelete) {
-      console.log('Paso 1: borrar hijos + lead…');
-      const deleted = await deleteCollected(targetConn, db);
-      console.log(`  ✓ borrados ${deleted} leads\n`);
-    }
-
-    if (opts.deleteOnly) {
-      console.log('(--delete-only) listo');
-      return;
-    }
-
-    const sourceConn = await sourcePool.getConnection();
+    const needSource = opts.fromProd || (!opts.dryRun && !opts.deleteOnly);
+    const sourceConn = needSource ? await sourcePool.getConnection() : null;
     try {
+      const ids = opts.fromProd
+        ? await collectIdsFromProd(sourceConn, targetConn, opts.since)
+        : await collectIds(targetConn, db, opts.since);
+      const [[inNorm]] = await targetConn.query(
+        `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
+         INNER JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)`
+      );
+      const [[keep]] = await targetConn.query(
+        `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
+         LEFT JOIN ${TMP} t ON t.id_lead = COALESCE(l.glide_id, l.id_lead)
+         WHERE t.id_lead IS NULL`
+      );
+
+      console.log(`IDs con updated >= since: ${ids.count}`);
+      console.log(`  ya en modelo (se rehacen): ${inNorm.c}`);
+      console.log(`  resto del modelo (intactos): ${keep.c}\n`);
+
+      if (opts.dryRun) {
+        console.log('(dry-run) no se borró ni migró nada');
+        return;
+      }
+
+      if (!opts.skipDelete) {
+        console.log('Paso 1: borrar hijos + lead…');
+        const deleted = await deleteCollected(targetConn, db);
+        console.log(`  ✓ borrados ${deleted} leads\n`);
+      }
+
+      if (opts.deleteOnly) {
+        console.log('(--delete-only) listo');
+        return;
+      }
+
       console.log('Paso 2: catálogos / maps…');
       console.log('  org snapshot ← tblLeads (no g_users / hierarchy_membership)');
       await syncInsuranceCatalog(sourceConn, targetConn, { truncate: false, afterId: 0 });
@@ -241,10 +307,15 @@ async function main() {
       await syncInjurySiteCatalog(sourceConn, targetConn, { truncate: false });
       const maps = await loadCatalogMaps(targetConn);
 
-      console.log('Paso 3: re-migrar…');
+      console.log(`Paso 3: re-migrar desde ${opts.fromProd ? 'prod' : 'staging'}…`);
       const started = Date.now();
-      const result = await remigrateCollected(targetConn, maps, {
+      const result = await remigrateCollected(
+        opts.fromProd ? sourceConn : targetConn,
+        targetConn,
+        maps,
+        {
         limit: opts.limit,
+        fromProd: opts.fromProd,
         onProgress(done, tot) {
           process.stdout.write(`\r  ${done}/${tot} (${((done / tot) * 100).toFixed(1)}%)`);
         },
@@ -254,7 +325,7 @@ async function main() {
           (result.afterIdEnd ? ` (hasta idLead ${result.afterIdEnd})` : '')
       );
     } finally {
-      sourceConn.release();
+      if (sourceConn) sourceConn.release();
     }
   });
 }
