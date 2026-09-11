@@ -9,9 +9,9 @@
  *
  * Uso:
  *   npm run reload:full -- --dry-run
- *   npm run reload:full
- *   npm run reload:full -- --skip-copy     # usa staging actual
- *   npm run reload:full -- --full-copy     # DROP+CREATE tblLeads_src (más lento, más limpio)
+ *   npm run reload:full                 # copia completa prod → src, truncate, migrate
+ *   npm run reload:full -- --skip-copy  # usa staging actual (peligro: reimporta huérfanos)
+ *   npm run reload:full -- --sync-only  # sync 14 días (no limpia IDs borrados en prod)
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const { spawnSync } = require('child_process');
@@ -24,10 +24,14 @@ const ROOT = path.join(__dirname, '..');
 const STATE_FILE = path.join(ROOT, '.sync-state.json');
 
 function parseArgs(argv) {
+  const skipCopy = argv.includes('--skip-copy');
+  const syncOnly = argv.includes('--sync-only');
   return {
     dryRun: argv.includes('--dry-run'),
-    skipCopy: argv.includes('--skip-copy'),
-    fullCopy: argv.includes('--full-copy'),
+    skipCopy,
+    // Default: copia completa. --full-copy se mantiene por compat.
+    fullCopy: !skipCopy && !syncOnly,
+    syncOnly,
   };
 }
 
@@ -107,7 +111,7 @@ async function main() {
   console.log('reload:full — limpieza + carga desde 0');
   console.log(`  Destino: ${config.target.host}/${config.target.database}`);
   console.log(`  Modo:    ${opts.dryRun ? 'dry-run' : 'LIVE'}`);
-  console.log(`  Staging: ${opts.skipCopy ? 'skip' : opts.fullCopy ? 'full-copy' : 'sync'}\n`);
+  console.log(`  Staging: ${opts.skipCopy ? 'skip' : opts.fullCopy ? 'full-copy (prod → src limpio)' : 'sync 14d'}\n`);
 
   await printCounts('antes');
 
@@ -116,9 +120,10 @@ async function main() {
     if (!opts.skipCopy) {
       console.log(opts.fullCopy ? '  1. npm run copy:tblLeads-src' : '  1. npm run sync:tblLeads-src -- --since (últimos 14 días)');
     }
-    console.log('  2. npm run truncate');
-    console.log('  3. npm run migrate (+ resume hasta 0 pendientes)');
-    console.log('  4. escribir .sync-state.json');
+    console.log('  2. npm run prune:leads-orphans  (src vs prod; lead aún vacío post-truncate)');
+    console.log('  3. npm run truncate');
+    console.log('  4. npm run migrate (+ resume hasta 0 pendientes)');
+    console.log('  5. escribir .sync-state.json');
     return;
   }
 
@@ -134,6 +139,7 @@ async function main() {
     }
   }
 
+  runNpm('prune:leads-orphans');
   runNpm('truncate');
   await printCounts('post-truncate');
 

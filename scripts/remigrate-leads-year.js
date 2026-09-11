@@ -10,6 +10,9 @@
  * Motivo: los idLead no son contiguos por año (hay solape 2025/2026), así que
  * migrate --resume no alcanza para rehacer solo un año.
  *
+ * No borra sentinels (created=2100) ni IDs que ya no están en prod.
+ * Para eso: npm run prune:leads-orphans  (o reload:full).
+ *
  * Uso:
  *   node scripts/remigrate-leads-year.js --year 2026 --from-prod
  *   node scripts/remigrate-leads-year.js --year 2026 --from-prod --dry-run

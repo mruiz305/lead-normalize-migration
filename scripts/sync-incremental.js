@@ -56,6 +56,7 @@ function parseArgs(argv) {
   return {
     dryRun: argv.includes('--dry-run'),
     skipRemigrate: argv.includes('--skip-remigrate'),
+    skipPrune: argv.includes('--skip-prune'),
     since: sinceIdx >= 0 ? argv[sinceIdx + 1] : null,
     hours: hoursIdx >= 0 ? Number(argv[hoursIdx + 1]) : null,
   };
@@ -123,13 +124,19 @@ async function main() {
   if (opts.dryRun) {
     console.log('\n(dry-run) pasos:');
     console.log(`  1. sync:tblLeads-src -- --since "${since}"`);
-    if (!opts.skipRemigrate) console.log(`  2. remigrate:updated -- --since "${since}"`);
-    console.log('  3. migrate:resume');
-    console.log('  4. actualizar .sync-state.json');
+    if (!opts.skipPrune) console.log('  2. prune:leads-orphans  (IDs que ya no están en prod.tblLeads)');
+    if (!opts.skipRemigrate) console.log(`  3. remigrate:updated -- --since "${since}"`);
+    console.log('  4. migrate:resume');
+    console.log('  5. actualizar .sync-state.json');
     return;
   }
 
   runNpm('sync:tblLeads-src', ['--since', since]);
+  if (!opts.skipPrune) {
+    runNpm('prune:leads-orphans');
+  } else {
+    console.log('\n(skip prune orphans)');
+  }
 
   if (!opts.skipRemigrate) {
     runNpm('remigrate:updated', ['--since', since]);

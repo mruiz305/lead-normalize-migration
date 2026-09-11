@@ -53,7 +53,7 @@ const MIGRATION_SOURCES = [
       { label: 'Contacto', tables: ['user_channel'], note: 'Teléfonos, email, fbHandle, igHandle' },
       { label: 'Jerarquía', tables: ['hierarchy_membership'], note: 'Office → pod → team → duo (org actual)' },
       { label: 'Historial HR', tables: ['user_hr_period'], note: 'Pasadas laborales cerradas (rehire / email duplicado)' },
-      { label: 'Permisos extra', tables: ['user_access_grant'], note: 'Grants scope ajeno — hierarchySpecialAccess* pendiente' },
+      { label: 'Permisos extra', tables: ['app_user'], note: 'hierarchySpecialAccessZc/Cd en app_user; user_access_grant sigue para grants de scope' },
     ],
     notes: [
       'Compensación: hr_deal_goal ← COALESCE(DealGoal, hrDealGoal); hr_deal_goal_custom ← DealGoalCustom; paylocity_id ← paylocityId',

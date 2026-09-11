@@ -20,10 +20,18 @@ const {
   ensureSubOfficeCatalogFromGUsers,
 } = require('./subOfficeCatalog');
 const { ensureAppUserRowIdKey } = require('./appUserRowIdKey');
+const {
+  extraSelectSql,
+  extraInsertColumnsSql,
+  extraUpdateAssignmentsSql,
+  extraParamValues,
+  loadGUserColumnSet,
+  ensureAppUserExtraColumns,
+} = require('./appUserExtras');
 
 const BATCH_SIZE = 200;
 
-const G_USER_SELECT = `
+const G_USER_SELECT_CORE = `
   id, rowId, name, nick, email, phone, title, systemAccessLevel, office, SubOffice,
   systemDepartment, \`rank\`, picture, hrEeType, dob,
   hrDealAmount, hrBudget, boostBudget, managementPay,
@@ -86,7 +94,7 @@ async function loadCatalogMaps(targetConn) {
   };
 }
 
-function rowToParams(r, maps, idUser) {
+function rowToParams(r, maps, idUser, availableCols) {
   const active = isActiveHr(r.hrStatus) ? 1 : 0;
   const email = normText(r.email);
   return [
@@ -123,6 +131,7 @@ function rowToParams(r, maps, idUser) {
     trimUrl(r.leadSheetURL),
     trimUrl(r.individualLeadSheetURL),
     normText(r.Referred_By),
+    ...extraParamValues(r, availableCols),
   ];
 }
 
@@ -133,7 +142,8 @@ const INSERT_COLUMNS = `
   hr_deal_goal, hr_deal_goal_custom, paylocity_id,
   hr_status, hired_at, termed_at, is_active,
   individual_log_url, roster_file_url, roster_last_month_file_url, machine_file_url,
-  lead_sheet_url, individual_lead_sheet_url, referred_by
+  lead_sheet_url, individual_lead_sheet_url, referred_by,
+  ${extraInsertColumnsSql()}
 `;
 
 const UPDATE_ASSIGNMENTS = `
@@ -168,16 +178,20 @@ const UPDATE_ASSIGNMENTS = `
   lead_sheet_url = VALUES(lead_sheet_url),
   individual_lead_sheet_url = VALUES(individual_lead_sheet_url),
   referred_by = VALUES(referred_by),
+  ${extraUpdateAssignmentsSql()},
   synced_at = CURRENT_TIMESTAMP
 `;
 
-const ROW_PLACEHOLDER =
-  '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
+function rowPlaceholder(n) {
+  return `(${Array.from({ length: n }, () => '?').join(', ')})`;
+}
 
-async function loadGUsersRows(sourceConn) {
+async function loadGUsersRows(sourceConn, availableCols) {
   const src = config.source.database;
+  const extras = extraSelectSql(availableCols);
+  const select = extras ? `${G_USER_SELECT_CORE}, ${extras}` : G_USER_SELECT_CORE;
   const [rows] = await sourceConn.query(`
-    SELECT ${G_USER_SELECT}
+    SELECT ${select}
     FROM \`${src}\`.g_users
     WHERE rowId IS NOT NULL AND TRIM(rowId) <> ''
     ORDER BY id
@@ -202,7 +216,8 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
   activeOnlyInserts = false,
 } = {}) {
   const tgt = config.target.database;
-  const rows = await loadGUsersRows(sourceConn);
+  const availableCols = await loadGUserColumnSet(sourceConn);
+  const rows = await loadGUsersRows(sourceConn, availableCols);
   const uniqueRows = uniqueRowsByRowId(rows);
   const dupes = rows.length - uniqueRows.length;
 
@@ -261,6 +276,8 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
   let subOfficeCatalog = { sourceDistinct: 0, inserted: 0 };
   if (!dryRun) {
     schema = await ensureAppUserRowIdKey(targetConn);
+    const extras = await ensureAppUserExtraColumns(targetConn);
+    schema.changes = [...(schema.changes || []), ...extras.added];
     subOfficeCatalog = await ensureSubOfficeCatalogFromGUsers(sourceConn, targetConn);
   }
   const maps = await loadCatalogMaps(targetConn);
@@ -274,12 +291,15 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
   `;
 
   let upserted = 0;
+  const placeholder = rowPlaceholder(rowToParams({}, maps, 0, availableCols).length);
   if (!dryRun) {
     const runBatch = async (batch) => {
       if (!batch.length) return;
-      const params = batch.flatMap(({ row, idUser }) => rowToParams(row, maps, idUser));
+      const params = batch.flatMap(({ row, idUser }) =>
+        rowToParams(row, maps, idUser, availableCols)
+      );
       await targetConn.query(
-        `${sqlHead} ${batch.map(() => ROW_PLACEHOLDER).join(', ')}
+        `${sqlHead} ${batch.map(() => placeholder).join(', ')}
          ON DUPLICATE KEY UPDATE ${UPDATE_ASSIGNMENTS}`,
         params
       );
@@ -319,7 +339,7 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
 }
 
 module.exports = {
-  G_USER_SELECT,
+  G_USER_SELECT: G_USER_SELECT_CORE,
   uniqueRowsByRowId,
   groupByRowId,
   loadGUsersRows,

@@ -867,5 +867,6 @@ module.exports = {
   getResumeWatermark,
   transformLead,
   flushLeadBatch,
+  deleteLeadGraphBySourceIds,
   LEAD_SELECT_COLUMNS,
 };
