@@ -1,18 +1,22 @@
--- Quién administra esta membresía.
---   GLIDE  → la deriva sync:users desde g_users + el catálogo de oficinas.
---   PORTAL → la administra la app nueva, para usuarios que no existen en
---            g_users y por lo tanto no tienen de dónde derivarse.
+-- Quién escribió esta membresía.
+--   GLIDE  → la derivó sync:users desde g_users + el catálogo de oficinas.
+--   PORTAL → la escribió la app nueva al dar de alta o editar un usuario.
 --
--- Hasta ahora sync:users hacía TRUNCATE y rehacía la tabla entera cada 3
--- minutos, así que una fila cargada a mano no sobrevivía a un solo tick. Con
--- esta columna el sync borra únicamente lo que sabe reconstruir.
+-- No es una marca de propiedad permanente. Mientras una persona exista en
+-- g_users, Glide sigue mandando sobre ella: el sync borra todas sus filas, sin
+-- mirar el origen, y las rehace. Lo que la columna permite es distinguir las
+-- filas derivadas que quedaron colgadas de alguien que ya salió de g_users, y
+-- borrarlas también — sin perder de paso la jerarquía de los usuarios que
+-- g_users no conoce, que son los que nacen en el portal.
 --
--- El default es PORTAL por la misma razón que en lead.origin: si algún camino
--- inserta sin marcar el origen, la fila queda protegida en vez de expuesta a
--- que el próximo sync se la lleve.
+-- Antes de esto el sync hacía TRUNCATE de la tabla entera cada 3 minutos, así
+-- que esos usuarios quedaban sin jerarquía a los pocos minutos de crearlos.
+--
+-- El default es PORTAL porque el INSERT del intake-api no lista la columna: lo
+-- que escribe la app nueva queda marcado solo con el default, sin tocar esa API.
 
 ALTER TABLE hierarchy_membership
   ADD COLUMN origin ENUM('GLIDE','PORTAL') NOT NULL DEFAULT 'PORTAL'
-    COMMENT 'Quién administra la fila — GLIDE (derivada de g_users) | PORTAL (administrada por la app nueva)'
+    COMMENT 'Quién escribió la fila — GLIDE (derivada de g_users) | PORTAL (escrita por la app nueva)'
     AFTER is_active,
   ADD KEY idx_hierarchy_membership_origin (origin);

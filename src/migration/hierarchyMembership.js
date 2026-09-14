@@ -58,12 +58,47 @@ async function loadCompanyOfficeMap(targetConn) {
   return byCode;
 }
 
+/**
+ * Borra lo que esta corrida va a rehacer, y solo eso.
+ *
+ * Dos conjuntos, por razones distintas. Las filas origin='GLIDE' porque son
+ * derivadas y pueden haber quedado de un usuario que ya salió de g_users; si
+ * no se borran acá, quedan colgadas para siempre. Y todas las filas de los
+ * usuarios que sí vamos a derivar, sin mirar el origen, porque mientras una
+ * persona exista en g_users Glide manda sobre ella: una edición allá tiene que
+ * ganarle a lo que haya escrito el portal, y dejar las dos versiones le daría
+ * al usuario dos jefes en el mismo nivel.
+ *
+ * Lo que sobrevive es la jerarquía de los usuarios que g_users no conoce —
+ * los que nacen en el portal, que antes se perdían en cada TRUNCATE.
+ */
+async function clearDerived(targetConn, tgtDb, userIds) {
+  await targetConn.query(
+    `DELETE FROM \`${tgtDb}\`.hierarchy_membership WHERE origin = 'GLIDE'`
+  );
+
+  const ids = [...userIds];
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_SIZE);
+    await targetConn.query(
+      `DELETE FROM \`${tgtDb}\`.hierarchy_membership
+       WHERE user_id IN (${chunk.map(() => '?').join(', ')})`,
+      chunk
+    );
+  }
+
+  const [[{ c }]] = await targetConn.query(
+    `SELECT COUNT(*) AS c FROM \`${tgtDb}\`.hierarchy_membership`
+  );
+  return Number(c);
+}
+
 async function flushMemberships(targetConn, tgtDb, batch) {
   if (!batch.length) return 0;
-  // IGNORE porque la clave única no incluye el origen: si la app nueva ya
-  // administra esa misma membresía, la suya gana y la derivada se descarta.
+  // Sin IGNORE: clearDerived ya borró todas las filas de estos usuarios, así
+  // que un duplicado acá sería un error de verdad y queremos verlo.
   const head = `
-    INSERT IGNORE INTO \`${tgtDb}\`.hierarchy_membership
+    INSERT INTO \`${tgtDb}\`.hierarchy_membership
       (user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader, is_primary, is_active, origin)
     VALUES
   `;
@@ -116,21 +151,6 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
   }
 
   const gUsers = await loadGUsers(sourceConn);
-
-  if (truncate) {
-    // Borra solo lo que este sync sabe rehacer. Las filas de origen PORTAL las
-    // administra la app nueva para usuarios que no existen en g_users, y un
-    // TRUNCATE se las llevaba en cada corrida — cada 3 minutos.
-    const [cleared] = await targetConn.query(
-      `DELETE FROM \`${tgtDb}\`.hierarchy_membership WHERE origin = 'GLIDE'`
-    );
-    const [[kept]] = await targetConn.query(
-      `SELECT COUNT(*) AS c FROM \`${tgtDb}\`.hierarchy_membership WHERE origin = 'PORTAL'`
-    );
-    if (kept.c) {
-      console.log(`  ${cleared.affectedRows} filas de Glide rehechas · ${kept.c} del portal intactas`);
-    }
-  }
 
   const pending = [];
   const seen = new Set();
@@ -227,11 +247,31 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     }
   }
 
-  const inserted = await flushMemberships(targetConn, tgtDb, pending);
+  let kept = 0;
+  let inserted = 0;
+  if (truncate) {
+    // En una transacción: con TRUNCATE era imposible, y eso dejaba una ventana
+    // cada 3 minutos en la que la tabla estaba a medio rehacer y las consultas
+    // por jerarquía del API no encontraban nada.
+    await targetConn.beginTransaction();
+    try {
+      kept = await clearDerived(targetConn, tgtDb, new Set(pending.map((p) => p[0])));
+      inserted = await flushMemberships(targetConn, tgtDb, pending);
+      await targetConn.commit();
+    } catch (err) {
+      await targetConn.rollback();
+      throw err;
+    }
+    if (kept) {
+      console.log(`  ${kept} filas de usuarios que Glide no conoce, intactas`);
+    }
+  } else {
+    inserted = await flushMemberships(targetConn, tgtDb, pending);
+  }
   console.log(
     `  ✓ hierarchy_membership: ${inserted} filas (${memberCount} office members, ${leaderCount} leaders)`
   );
-  return { inserted, members: memberCount, leaders: leaderCount, skipped: false };
+  return { inserted, members: memberCount, leaders: leaderCount, kept, skipped: false };
 }
 
 module.exports = { populateHierarchyMembership };
