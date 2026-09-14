@@ -534,6 +534,9 @@ async function flushLeadBatch(targetConn, items, maps) {
     'lead_sort_order', 'new_leads', 'id_media', 'link_to_lead_record', 'intake_view_stepper',
     'id_acc', 'id_lead_old', 'employer', 'requested_drop',
     'legacy_lead_id', 'legacy_case_id', 'created_by_user_id', 'created_at',
+    // origin explícito por claridad, aunque el trigger lead_origin_bi lo
+    // vuelve a derivar de glide_id: la base es la autoridad, para que un
+    // proceso desactualizado no marque leads de Glide como del portal.
     'updated_by_user_id', 'updated_at', 'origin',
   ], items.map((i) => [...i.lead, 'GLIDE']));
 

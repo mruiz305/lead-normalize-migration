@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 /**
- * Añade lead.origin (GLIDE | PORTAL, default PORTAL) y marca como GLIDE el
- * histórico migrado.
+ * Añade lead.origin (GLIDE | PORTAL, default PORTAL), marca como GLIDE el
+ * histórico migrado y deja el trigger que deriva el origen en cada INSERT.
  *
  * El backfill aprovecha que hoy glide_id todavía distingue el origen: solo la
  * migración escribe glide_id. En cuanto leads-sync-api empiece a espejar leads
  * del portal en prod y les devuelva su idLead, esa equivalencia se rompe — por
  * eso el backfill corre una única vez, al crear la columna.
+ *
+ * El trigger sí se reaplica siempre: es lo que mantiene el origen correcto aun
+ * si algún proceso quedó en una versión que no conoce la columna.
  *
  *   npm run patch:lead-origin
  */
@@ -46,6 +49,14 @@ async function main() {
       console.log('  · columna ya existe');
       console.log('  · sin backfill (glide_id ya no distingue el origen una vez activo el espejo)');
     }
+
+    // Siempre: DROP IF EXISTS + CREATE, así que reaplicarlo es seguro.
+    const triggerSql = fs.readFileSync(
+      path.join(config.sqlDir, 'patches', 'add_lead_origin_trigger.sql'),
+      'utf8'
+    );
+    await conn.query(triggerSql);
+    console.log('  ✓ trigger lead_origin_bi (deriva origin desde glide_id en cada INSERT)');
 
     const [[{ glide, portal, portalLinked }]] = await conn.query(
       `SELECT

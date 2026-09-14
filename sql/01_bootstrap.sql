@@ -756,6 +756,13 @@ CREATE TABLE `lead` (
   CONSTRAINT fk_lead_updated_by_user FOREIGN KEY (updated_by_user_id) REFERENCES app_user (id_user)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- El origen lo decide la base: en el INSERT, traer glide_id es lo que distingue
+-- un lead migrado de uno nacido en el portal. Ver sql/patches/add_lead_origin_trigger.sql.
+CREATE TRIGGER lead_origin_bi
+BEFORE INSERT ON `lead`
+FOR EACH ROW
+  SET NEW.origin = IF(NEW.glide_id IS NULL, 'PORTAL', 'GLIDE');
+
 CREATE TABLE lead_accident (
   id_lead int NOT NULL,
   date_of_accident date DEFAULT NULL,
