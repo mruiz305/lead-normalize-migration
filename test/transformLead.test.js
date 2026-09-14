@@ -23,9 +23,9 @@ describe("transformLead happy path", () => {
   it("arma lead, client y canales phone/email", () => {
     const out = transformLead(baseLead(), buildMaps());
     assert.equal(out.leadId, 1001);
-    assert.equal(out.lead[0], 1001);
-    assert.equal(out.lead[4], 81);
-    assert.equal(out.lead[5], 501);
+    assert.equal(out.lead[0], 1001); // glide_id: el PK local lo asigna AUTO_INCREMENT
+    assert.equal(out.lead[3], 81);
+    assert.equal(out.lead[4], 501);
     assert.equal(out.client[0], "Ana");
     assert.equal(out.client[1], "Perez");
     assert.equal(out.client[6], "2024-01-15 10:00:00");
@@ -53,14 +53,14 @@ describe("transformLead fechas y catálogos", () => {
     assert.ok(rejectReasons(out).includes("office_catalog_miss"));
     assert.ok(rejectFields(out).includes("officeLabel"));
     assert.equal(out.lead[0], 1001);
-    assert.equal(out.lead[4], null);
+    assert.equal(out.lead[3], null);
   });
 
   it("submitter desconocido → user_miss, staff conserva el email", () => {
     const out = transformLead(baseLead({ submitter: "ghost@x.com" }), buildMaps());
     assert.ok(rejectReasons(out).includes("user_miss"));
     assert.ok(rejectFields(out).includes("submitter"));
-    assert.equal(out.lead[5], null);
+    assert.equal(out.lead[4], null);
     assert.equal(out.staff.length, 1);
     assert.equal(out.staff[0][3], "ghost@x.com");
   });
@@ -163,7 +163,7 @@ describe("transformLead org snapshot", () => {
     assert.equal(s[17], 605);
     assert.equal(s[18], "duo@nofault.com");
     assert.equal(s[20], 606);
-    assert.equal(out.lead[4], 82);
+    assert.equal(out.lead[3], 82);
   });
 });
 

@@ -38,15 +38,11 @@ async function main() {
       console.log(`  ✓ backfill histórico glide_id = id_lead: ${upd.affectedRows} filas`);
     } else {
       console.log('  · columna ya existe');
-      // Re-run seguro: solo filas que aún coinciden con staging (no inventar glide en solo-portal).
-      const srcTable = process.env.MIG_SOURCE_LEADS_TABLE || 'tblLeads_src';
-      const [upd] = await conn.query(
-        `UPDATE \`${db}\`.\`lead\` l
-         INNER JOIN \`${db}\`.\`${srcTable}\` s ON s.idLead = l.id_lead
-         SET l.glide_id = l.id_lead
-         WHERE l.glide_id IS NULL`
-      );
-      console.log(`  ✓ backfill residual (via ${srcTable}): ${upd.affectedRows} filas`);
+      // El backfill residual por id_lead se retiró: desde que la migración deja
+      // que AUTO_INCREMENT asigne el PK, id_lead ya no equivale al idLead de
+      // origen. Cruzarlo contra staging marcaría leads del portal como si
+      // vinieran de Glide y remigrate los sobrescribiría.
+      console.log('  · sin backfill residual (id_lead ya no equivale al idLead de origen)');
     }
     const [[{ total, withGlide, onlyPortal }]] = await conn.query(
       `SELECT

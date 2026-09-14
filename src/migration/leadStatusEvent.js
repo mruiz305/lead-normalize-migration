@@ -104,7 +104,7 @@ async function loadDurationEvents(sourceConn, targetConn, leadCount) {
       SELECT d.IdLeadStatusDuration, l.id_lead AS idLead,
              d.valueBefore, d.valueAfter, d.statusBegin, d.statusEnd
       FROM \`${src}\`.dashLeadStatusDuration d
-      INNER JOIN \`${tgt}\`.lead l ON COALESCE(l.glide_id, l.id_lead) = d.idLead
+      INNER JOIN \`${tgt}\`.lead l ON l.glide_id = d.idLead
       ORDER BY l.id_lead, d.statusBegin, d.IdLeadStatusDuration
     `);
     return rows;
@@ -112,7 +112,7 @@ async function loadDurationEvents(sourceConn, targetConn, leadCount) {
 
   logStep(`dashLeadStatusDuration (~${leadCount} leads, por lotes)…`);
   const [idRows] = await targetConn.query(
-    `SELECT id_lead, COALESCE(glide_id, id_lead) AS glide_key FROM \`${tgt}\`.lead`
+    `SELECT id_lead, glide_id AS glide_key FROM \`${tgt}\`.lead WHERE glide_id IS NOT NULL`
   );
   const localByGlide = new Map(idRows.map((r) => [Number(r.glide_key), Number(r.id_lead)]));
   const out = [];
@@ -147,7 +147,7 @@ async function loadCatalogStatusEvents(sourceConn, targetConn, leadCount) {
              c.value AS catalogValue, c.statusTypeId
       FROM \`${src}\`.tblLeadsStatus s
       INNER JOIN \`${src}\`.tblLeadsStatusCatalog c ON c.Id = s.leadsStatusCatalogId
-      INNER JOIN \`${tgt}\`.lead l ON COALESCE(l.glide_id, l.id_lead) = s.idLead
+      INNER JOIN \`${tgt}\`.lead l ON l.glide_id = s.idLead
       ORDER BY l.id_lead, s.createdAt, s.Id
     `);
     return rows;
@@ -155,7 +155,7 @@ async function loadCatalogStatusEvents(sourceConn, targetConn, leadCount) {
 
   logStep(`tblLeadsStatus (~${leadCount} leads, por lotes)…`);
   const [idRows] = await targetConn.query(
-    `SELECT id_lead, COALESCE(glide_id, id_lead) AS glide_key FROM \`${tgt}\`.lead`
+    `SELECT id_lead, glide_id AS glide_key FROM \`${tgt}\`.lead WHERE glide_id IS NOT NULL`
   );
   const localByGlide = new Map(idRows.map((r) => [Number(r.glide_key), Number(r.id_lead)]));
   const out = [];

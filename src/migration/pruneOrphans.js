@@ -45,11 +45,13 @@ async function loadSrcLeadIds(targetConn) {
   return fetchIdSet(targetConn, `SELECT idLead AS id FROM \`${db}\`.tblLeads_src`);
 }
 
+// Solo leads originados en Glide: los creados en el portal (glide_id NULL) no
+// existen en prod.tblLeads por definición y no son huérfanos.
 async function loadNormLeadIds(targetConn) {
   const db = config.target.database;
   return fetchIdSet(
     targetConn,
-    `SELECT COALESCE(glide_id, id_lead) AS id FROM \`${db}\`.\`lead\``
+    `SELECT glide_id AS id FROM \`${db}\`.\`lead\` WHERE glide_id IS NOT NULL`
   );
 }
 

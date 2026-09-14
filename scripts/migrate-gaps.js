@@ -57,7 +57,7 @@ async function main() {
       `INSERT INTO ${TMP} (id_lead)
        SELECT s.idLead
        FROM \`${db}\`.\`${DEST_TABLE}\` s
-       LEFT JOIN \`${db}\`.\`lead\` l ON COALESCE(l.glide_id, l.id_lead) = s.idLead
+       LEFT JOIN \`${db}\`.\`lead\` l ON l.glide_id = s.idLead
        WHERE l.id_lead IS NULL`
     );
     const [[{ c }]] = await conn.query(`SELECT COUNT(*) AS c FROM ${TMP}`);
@@ -129,7 +129,7 @@ async function main() {
     const [[{ remaining }]] = await conn.query(
       `SELECT COUNT(*) AS remaining
        FROM \`${db}\`.\`${DEST_TABLE}\` s
-       LEFT JOIN \`${db}\`.\`lead\` l ON COALESCE(l.glide_id, l.id_lead) = s.idLead
+       LEFT JOIN \`${db}\`.\`lead\` l ON l.glide_id = s.idLead
        WHERE l.id_lead IS NULL`
     );
     console.log(`\n✓ Migrados ${migrated}. Gaps restantes en src: ${remaining}`);

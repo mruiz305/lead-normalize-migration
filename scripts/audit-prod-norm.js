@@ -56,7 +56,7 @@ async function countAudit() {
     );
     const [[miss]] = await c.query(`
       SELECT COUNT(*) c FROM \`${tgtDb}\`.tblLeads_src src
-      LEFT JOIN \`${tgtDb}\`.\`lead\` l ON COALESCE(l.glide_id, l.id_lead) = src.idLead
+      LEFT JOIN \`${tgtDb}\`.\`lead\` l ON l.glide_id = src.idLead
       WHERE l.id_lead IS NULL
     `);
     stagingCount = s.c;
@@ -92,7 +92,7 @@ async function valueAudit(range, sampleLimit) {
 
   let idList = []; // glide keys (prod idLead)
   await withTarget(async (c) => {
-    let sql = `SELECT COALESCE(l.glide_id, l.id_lead) AS glide_key, l.id_lead
+    let sql = `SELECT l.glide_id AS glide_key, l.id_lead
                FROM \`${tgtDb}\`.\`lead\` l`;
     const params = [];
     if (range) {
@@ -138,7 +138,7 @@ async function valueAudit(range, sampleLimit) {
     );
     const [normRows] = await withTarget((c) =>
       c.query(
-        `SELECT l.id_lead, COALESCE(l.glide_id, l.id_lead) AS glide_key,
+        `SELECT l.id_lead, l.glide_id AS glide_key,
           lt.date_locked_down, lc.appointment_at,
           ra.display_name AS attorney, rtl.display_name AS txLocation,
           rls.leadStatus, l.updated_at
@@ -241,11 +241,11 @@ async function recentStatusAudit(hours = 72) {
     const ph = ids.map(() => '?').join(',');
     const [normRows] = await withTarget((c) =>
       c.query(
-        `SELECT COALESCE(l.glide_id, l.id_lead) AS glide_key, l.id_lead,
+        `SELECT l.glide_id AS glide_key, l.id_lead,
                 rls.leadStatus, l.updated_at
          FROM \`${tgtDb}\`.\`lead\` l
          LEFT JOIN refLeadStatus rls ON rls.idLeadStatus = l.id_lead_status
-         WHERE COALESCE(l.glide_id, l.id_lead) IN (${ph})`,
+         WHERE l.glide_id IN (${ph})`,
         ids
       )
     );

@@ -329,7 +329,7 @@ function transformLead(l, maps) {
     channels,
     addresses: buildClientAddresses(l, maps, leadId, rejects),
     lead: [
-      leadId, leadId, idLeadStatus, idStage, idCompanyOffice, submitterUserId,
+      leadId, idLeadStatus, idStage, idCompanyOffice, submitterUserId,
       trimOrNull(l.referralSource), trimOrNull(l.sourceType), trimOrNull(l.internalSource),
       trimOrNull(l.caseType), trimOrNull(l.accidentOrWC),
       bool(l.isVIP), bool(l.isHotLead), l.hotLeadStartTime, bool(l.boostYN), bool(l.confirmed), l.cnvValue,
@@ -417,7 +417,7 @@ async function resolveInjurySiteIds(maps, items) {
     for (const entry of item.injurySiteRaws) {
       let id = entry.id;
       if (!id) id = await maps.ensureInjurySite(entry.token);
-      if (id) item.injurySites.push([item.leadId, id]);
+      if (id) item.injurySites.push([item._leadId, id]);
     }
   }
 }
@@ -473,6 +473,25 @@ async function resolveInsuranceCarrierIds(maps, insuranceRows) {
   }
 }
 
+/**
+ * El PK local lo asigna AUTO_INCREMENT, no el idLead de origen: glide_id es la
+ * única identidad de Glide. Las filas hijas se arman en transformLead con el
+ * idLead de origen en la posición 0, así que hay que reapuntarlas al id local.
+ */
+function relinkLeadId(item, leadId) {
+  for (const row of [
+    item.orgSnapshot, item.accident, item.legal,
+    item.clinical, item.injury, item.timeline,
+  ]) {
+    if (row) row[0] = leadId;
+  }
+  for (const rows of [item.staff, item.syncFlags, item.notes, item.insurance, item.rejects]) {
+    for (const row of rows || []) row[0] = leadId;
+  }
+  // psnMeta copia la referencia de party, así que alcanza con mutar acá.
+  for (const psn of item.passengers || []) psn.party[0] = leadId;
+}
+
 async function flushLeadBatch(targetConn, items, maps) {
   if (!items.length) return;
   const db = config.target.database;
@@ -507,8 +526,8 @@ async function flushLeadBatch(targetConn, items, maps) {
     ], addressRows);
   }
 
-  await bulkInsert(targetConn, db, 'lead', [
-    'id_lead', 'glide_id', 'id_lead_status', 'id_stage', 'id_company_office', 'submitter_user_id',
+  const baseLeadId = await bulkInsert(targetConn, db, 'lead', [
+    'glide_id', 'id_lead_status', 'id_stage', 'id_company_office', 'submitter_user_id',
     'referral_source', 'source_type', 'internal_source', 'case_type', 'accident_or_wc',
     'is_vip', 'is_hot_lead', 'hot_lead_start_at', 'boost_yn', 'confirmed', 'cnv_value',
     'callback_id', 'callback_id_new', 'is_callback', 'is_callback_new',
@@ -517,6 +536,11 @@ async function flushLeadBatch(targetConn, items, maps) {
     'legacy_lead_id', 'legacy_case_id', 'created_by_user_id', 'created_at',
     'updated_by_user_id', 'updated_at',
   ], items.map((i) => i.lead));
+
+  items.forEach((item, idx) => {
+    item._leadId = baseLeadId + idx;
+    relinkLeadId(item, item._leadId);
+  });
 
   await bulkInsert(targetConn, db, 'lead_org_snapshot', [
     'id_lead',
@@ -578,7 +602,7 @@ async function flushLeadBatch(targetConn, items, maps) {
   await bulkInsert(targetConn, db, 'lead_party', [
     'id_lead', 'id_client', 'id_party_kind', 'party_sequence', 'is_primary_party',
     'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-  ], items.map((i) => withFullAudit([i.leadId, i._clientId, PARTY_INJURED, null, 1], i.audit)));
+  ], items.map((i) => withFullAudit([i._leadId, i._clientId, PARTY_INJURED, null, 1], i.audit)));
 
   const psnClients = [];
   const psnMeta = [];
@@ -699,19 +723,21 @@ async function getResumeWatermark(targetConn) {
   return Number(row.maxId);
 }
 
-/** idLead ya presente como PK o glide_id. */
+/**
+ * idLead de origen ya migrado. Solo glide_id: un lead creado en el portal tiene
+ * glide_id NULL y su id_lead pertenece a otra secuencia, así que mirar id_lead
+ * haría pasar por migrado un lead de Glide que nunca entró.
+ */
 async function existingSourceLeadIds(targetConn, ids) {
   if (!ids.length) return new Set();
   const db = config.target.database;
   const ph = ids.map(() => '?').join(',');
   const [rows] = await targetConn.query(
-    `SELECT id_lead, glide_id FROM \`${db}\`.\`lead\`
-     WHERE id_lead IN (${ph}) OR glide_id IN (${ph})`,
-    [...ids, ...ids]
+    `SELECT glide_id FROM \`${db}\`.\`lead\` WHERE glide_id IN (${ph})`,
+    ids
   );
   const out = new Set();
   for (const r of rows) {
-    if (r.id_lead != null) out.add(Number(r.id_lead));
     if (r.glide_id != null) out.add(Number(r.glide_id));
   }
   return out;
@@ -733,12 +759,12 @@ const LEAD_CHILD_TABLES = [
   'import_reject',
 ];
 
-/** Borra un lead y sus hijos. Match por glide_id, si no id_lead (= idLead de origen). */
+/** Borra un lead de Glide y sus hijos. Nunca alcanza a los leads solo-portal (glide_id NULL). */
 async function deleteLeadGraphBySourceIds(conn, sourceIds) {
   if (!sourceIds.length) return 0;
   const db = config.target.database;
   const ph = sourceIds.map(() => '?').join(',');
-  const match = `COALESCE(l.glide_id, l.id_lead) IN (${ph})`;
+  const match = `l.glide_id IN (${ph})`;
 
   await conn.query(
     `DELETE lpis FROM \`${db}\`.lead_party_injury_site lpis
