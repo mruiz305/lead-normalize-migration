@@ -534,8 +534,8 @@ async function flushLeadBatch(targetConn, items, maps) {
     'lead_sort_order', 'new_leads', 'id_media', 'link_to_lead_record', 'intake_view_stepper',
     'id_acc', 'id_lead_old', 'employer', 'requested_drop',
     'legacy_lead_id', 'legacy_case_id', 'created_by_user_id', 'created_at',
-    'updated_by_user_id', 'updated_at',
-  ], items.map((i) => i.lead));
+    'updated_by_user_id', 'updated_at', 'origin',
+  ], items.map((i) => [...i.lead, 'GLIDE']));
 
   items.forEach((item, idx) => {
     item._leadId = baseLeadId + idx;
@@ -724,9 +724,13 @@ async function getResumeWatermark(targetConn) {
 }
 
 /**
- * idLead de origen ya migrado. Solo glide_id: un lead creado en el portal tiene
- * glide_id NULL y su id_lead pertenece a otra secuencia, así que mirar id_lead
- * haría pasar por migrado un lead de Glide que nunca entró.
+ * idLead de origen ya presentes en el modelo. Solo glide_id: un lead creado en
+ * el portal tiene glide_id NULL y su id_lead pertenece a otra secuencia, así
+ * que mirar id_lead haría pasar por migrado un lead de Glide que nunca entró.
+ *
+ * A propósito no filtra por origin: un lead del portal espejado en prod ya
+ * tiene su glide_id, y contarlo como presente es justo lo que evita que el
+ * sync lo vuelva a insertar como si fuera un lead distinto.
  */
 async function existingSourceLeadIds(targetConn, ids) {
   if (!ids.length) return new Set();
@@ -741,6 +745,24 @@ async function existingSourceLeadIds(targetConn, ids) {
     if (r.glide_id != null) out.add(Number(r.glide_id));
   }
   return out;
+}
+
+/**
+ * De unos idLead de prod, cuáles pertenecen en el modelo a un lead nacido en
+ * el portal (leads-sync-api lo espejó en prod y le devolvió el idLead).
+ * No hay nada que importar de ellos: la fila de prod es una copia más pobre
+ * del lead que ya tenemos, y como glide_id es UNIQUE el INSERT ni pasaría.
+ */
+async function portalOwnedSourceIds(targetConn, ids) {
+  if (!ids.length) return new Set();
+  const db = config.target.database;
+  const ph = ids.map(() => '?').join(',');
+  const [rows] = await targetConn.query(
+    `SELECT glide_id FROM \`${db}\`.\`lead\`
+     WHERE origin = 'PORTAL' AND glide_id IN (${ph})`,
+    ids
+  );
+  return new Set(rows.map((r) => Number(r.glide_id)));
 }
 
 const LEAD_CHILD_TABLES = [
@@ -759,12 +781,16 @@ const LEAD_CHILD_TABLES = [
   'import_reject',
 ];
 
-/** Borra un lead de Glide y sus hijos. Nunca alcanza a los leads solo-portal (glide_id NULL). */
+/**
+ * Borra un lead de Glide y sus hijos. El filtro por origin es el que protege a
+ * los leads nacidos en el portal: una vez espejados en prod tienen glide_id y
+ * sin él caerían acá, perdiendo todo lo que el modelo guarda y prod no.
+ */
 async function deleteLeadGraphBySourceIds(conn, sourceIds) {
   if (!sourceIds.length) return 0;
   const db = config.target.database;
   const ph = sourceIds.map(() => '?').join(',');
-  const match = `l.glide_id IN (${ph})`;
+  const match = `l.glide_id IN (${ph}) AND l.origin = 'GLIDE'`;
 
   await conn.query(
     `DELETE lpis FROM \`${db}\`.lead_party_injury_site lpis
@@ -851,25 +877,36 @@ async function runMigration(sourceConn, targetConn, maps, {
     if (rows.length === 0) break;
 
     const ids = rows.map((row) => Number(row.idLead));
-    const already = await existingSourceLeadIds(targetConn, ids);
-    const refreshIds = ids.filter((id) => already.has(id));
+    const portalOwned = await portalOwnedSourceIds(targetConn, ids);
+    const pending = portalOwned.size
+      ? rows.filter((row) => !portalOwned.has(Number(row.idLead)))
+      : rows;
+    if (portalOwned.size) {
+      console.log(`  · omitir ${portalOwned.size} espejados desde el portal (tras idLead ${cursor})`);
+    }
+
+    const pendingIds = pending.map((row) => Number(row.idLead));
+    const already = await existingSourceLeadIds(targetConn, pendingIds);
+    const refreshIds = pendingIds.filter((id) => already.has(id));
     if (refreshIds.length) {
       console.log(`  · actualizar ${refreshIds.length} ya en lead (tras idLead ${cursor})`);
     }
 
-    const transformed = rows.map((row) => transformLead(row, maps));
-    await targetConn.beginTransaction();
-    try {
-      if (refreshIds.length) {
-        await deleteLeadGraphBySourceIds(targetConn, refreshIds);
+    if (pending.length) {
+      const transformed = pending.map((row) => transformLead(row, maps));
+      await targetConn.beginTransaction();
+      try {
+        if (refreshIds.length) {
+          await deleteLeadGraphBySourceIds(targetConn, refreshIds);
+        }
+        await flushLeadBatch(targetConn, transformed, maps);
+        await targetConn.commit();
+      } catch (err) {
+        await targetConn.rollback();
+        throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
       }
-      await flushLeadBatch(targetConn, transformed, maps);
-      await targetConn.commit();
-    } catch (err) {
-      await targetConn.rollback();
-      throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
     }
-    migrated += rows.length;
+    migrated += pending.length;
 
     cursor = rows[rows.length - 1].idLead;
     scanned += rows.length;
@@ -894,5 +931,6 @@ module.exports = {
   transformLead,
   flushLeadBatch,
   deleteLeadGraphBySourceIds,
+  portalOwnedSourceIds,
   LEAD_SELECT_COLUMNS,
 };

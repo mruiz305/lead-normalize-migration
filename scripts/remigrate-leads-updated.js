@@ -134,6 +134,21 @@ async function collectIds(conn, db, since) {
   return { count: Number(c), inserted: Number(ins.affectedRows || 0) };
 }
 
+/**
+ * Saca de TMP los idLead que en el modelo pertenecen a un lead del portal.
+ * Es el único punto de corte que hace falta: sin esto el borrado se los
+ * llevaría puestos, y si solo protegiéramos el borrado la reimportación
+ * chocaría contra el UNIQUE de glide_id.
+ */
+async function dropPortalOwned(conn, db) {
+  const [r] = await conn.query(`
+    DELETE t FROM ${TMP} t
+    INNER JOIN \`${db}\`.\`lead\` l ON l.glide_id = t.id_lead
+    WHERE l.origin = 'PORTAL'
+  `);
+  return Number(r.affectedRows || 0);
+}
+
 async function deleteCollected(conn, db) {
   // TMP.id_lead = idLead Glide/src → resolver lead local vía glide_id.
   const childDirect = [
@@ -268,6 +283,7 @@ async function main() {
       const ids = opts.fromProd
         ? await collectIdsFromProd(sourceConn, targetConn, opts.since)
         : await collectIds(targetConn, db, opts.since);
+      const skippedPortal = await dropPortalOwned(targetConn, db);
       const [[inNorm]] = await targetConn.query(
         `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
          INNER JOIN ${TMP} t ON t.id_lead = l.glide_id`
@@ -279,6 +295,9 @@ async function main() {
       );
 
       console.log(`IDs con updated >= since: ${ids.count}`);
+      if (skippedPortal) {
+        console.log(`  omitidos por ser del portal: ${skippedPortal}`);
+      }
       console.log(`  ya en modelo (se rehacen): ${inNorm.c}`);
       console.log(`  resto del modelo (intactos): ${keep.c}\n`);
 

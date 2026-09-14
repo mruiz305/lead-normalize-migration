@@ -171,13 +171,22 @@ async function collectYearIds(targetConn, db, year, { fromProd, sourceConn } = {
     insertedFromSrc = Number(insSrc.affectedRows || 0);
   }
 
-  // Residuales en modelo: solo los originados en Glide; los solo-portal no se remigran.
+  // Residuales en modelo: solo los originados en Glide; los del portal no se remigran.
   const [insNorm] = await targetConn.query(
     `INSERT IGNORE INTO tmp_remigrate_year_ids (id_lead)
      SELECT glide_id FROM \`${db}\`.\`lead\`
-     WHERE glide_id IS NOT NULL AND created_at >= ? AND created_at < ?`,
+     WHERE glide_id IS NOT NULL AND origin = 'GLIDE'
+       AND created_at >= ? AND created_at < ?`,
     [from, to]
   );
+
+  // Los ids que vinieron del lado de origen pueden ser el espejo de un lead del
+  // portal: borrarlos y reimportarlos lo reconstruiría desde una copia más pobre.
+  const [skipped] = await targetConn.query(`
+    DELETE t FROM tmp_remigrate_year_ids t
+    INNER JOIN \`${db}\`.\`lead\` l ON l.glide_id = t.id_lead
+    WHERE l.origin = 'PORTAL'
+  `);
 
   const [[{ c }]] = await targetConn.query(
     'SELECT COUNT(*) AS c FROM tmp_remigrate_year_ids'
@@ -186,6 +195,7 @@ async function collectYearIds(targetConn, db, year, { fromProd, sourceConn } = {
     count: Number(c),
     insertedFromSrc,
     insertedFromNorm: Number(insNorm.affectedRows || 0),
+    skippedPortal: Number(skipped.affectedRows || 0),
   };
 }
 
@@ -327,6 +337,9 @@ async function main() {
         sourceConn,
       });
       console.log(`IDs a tocar: ${ids.count} (src+${ids.insertedFromSrc} / norm+${ids.insertedFromNorm})`);
+      if (ids.skippedPortal) {
+        console.log(`  omitidos por ser del portal: ${ids.skippedPortal}`);
+      }
 
       const [[pre]] = await targetConn.query(
         `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\`
