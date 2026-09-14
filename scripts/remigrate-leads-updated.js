@@ -203,7 +203,26 @@ async function deleteCollected(conn, db) {
   return Number(rLead.affectedRows);
 }
 
-async function remigrateCollected(readConn, targetConn, maps, { limit = null, onProgress, fromProd = false } = {}) {
+/**
+ * glide_id → id_lead de los leads que están por rehacerse. Hay que leerlo
+ * antes del borrado: después ya no existe de dónde sacarlo, y sin él la
+ * reinserción le asigna un PK nuevo a un lead que no cambió de identidad.
+ */
+async function collectExistingLeadIds(targetConn, db) {
+  const [rows] = await targetConn.query(
+    `SELECT l.glide_id, l.id_lead FROM \`${db}\`.\`lead\` l
+     INNER JOIN ${TMP} t ON t.id_lead = l.glide_id
+     WHERE l.origin = 'GLIDE'`
+  );
+  return new Map(rows.map((r) => [Number(r.glide_id), Number(r.id_lead)]));
+}
+
+async function remigrateCollected(
+  readConn,
+  targetConn,
+  maps,
+  { limit = null, onProgress, fromProd = false, preserveLeadIds = null } = {}
+) {
   const db = config.target.database;
   const colList = LEAD_SELECT_COLUMNS.map((c) => `\`${c}\``).join(', ');
   const readSql = leadsReadSql(fromProd);
@@ -235,7 +254,7 @@ async function remigrateCollected(readConn, targetConn, maps, { limit = null, on
     const transformed = rows.map((row) => transformLead(row, maps));
     await targetConn.beginTransaction();
     try {
-      await flushLeadBatch(targetConn, transformed, maps);
+      await flushLeadBatch(targetConn, transformed, maps, { preserveLeadIds });
       await targetConn.commit();
     } catch (err) {
       await targetConn.rollback();
@@ -306,6 +325,8 @@ async function main() {
         return;
       }
 
+      const preserveLeadIds = await collectExistingLeadIds(targetConn, db);
+
       if (!opts.skipDelete) {
         console.log('Paso 1: borrar hijos + lead…');
         const deleted = await deleteCollected(targetConn, db);
@@ -327,6 +348,9 @@ async function main() {
       const maps = await loadCatalogMaps(targetConn);
 
       console.log(`Paso 3: re-migrar desde ${opts.fromProd ? 'prod' : 'staging'}…`);
+      if (preserveLeadIds.size) {
+        console.log(`  conservando el id_lead original de ${preserveLeadIds.size} leads`);
+      }
       const started = Date.now();
       const result = await remigrateCollected(
         opts.fromProd ? sourceConn : targetConn,
@@ -335,6 +359,7 @@ async function main() {
         {
         limit: opts.limit,
         fromProd: opts.fromProd,
+        preserveLeadIds,
         onProgress(done, tot) {
           process.stdout.write(`\r  ${done}/${tot} (${((done / tot) * 100).toFixed(1)}%)`);
         },

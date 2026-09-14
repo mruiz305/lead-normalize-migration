@@ -75,12 +75,17 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function flushBatchWithRetry(targetConn, transformed, maps, { retries = 8 } = {}) {
+async function flushBatchWithRetry(
+  targetConn,
+  transformed,
+  maps,
+  { retries = 8, preserveLeadIds = null } = {}
+) {
   let lastErr;
   for (let attempt = 1; attempt <= retries; attempt++) {
     await targetConn.beginTransaction();
     try {
-      await flushLeadBatch(targetConn, transformed, maps);
+      await flushLeadBatch(targetConn, transformed, maps, { preserveLeadIds });
       await targetConn.commit();
       return;
     } catch (err) {
@@ -253,7 +258,28 @@ async function deleteYearLeads(conn, db, year) {
   return Number(rLead.affectedRows);
 }
 
-async function remigrateYear(sourceConn, targetConn, maps, year, { limit = null, onProgress, fromProd = false, afterId = 0 } = {}) {
+/**
+ * glide_id → id_lead del año que está por rehacerse, leído antes del borrado
+ * para que la reinserción no le cambie el PK a leads que siguen siendo el mismo.
+ */
+async function collectExistingLeadIds(targetConn, db, year) {
+  const { from, to } = yearBounds(year);
+  const [rows] = await targetConn.query(
+    `SELECT glide_id, id_lead FROM \`${db}\`.\`lead\`
+     WHERE origin = 'GLIDE' AND glide_id IS NOT NULL
+       AND created_at >= ? AND created_at < ?`,
+    [from, to]
+  );
+  return new Map(rows.map((r) => [Number(r.glide_id), Number(r.id_lead)]));
+}
+
+async function remigrateYear(
+  sourceConn,
+  targetConn,
+  maps,
+  year,
+  { limit = null, onProgress, fromProd = false, afterId = 0, preserveLeadIds = null } = {}
+) {
   const { from, to } = yearBounds(year);
   const colList = LEAD_SELECT_COLUMNS.map((c) => `\`${c}\``).join(', ');
   const readSql = leadsReadSql(fromProd);
@@ -286,7 +312,7 @@ async function remigrateYear(sourceConn, targetConn, maps, year, { limit = null,
 
     const transformed = rows.map((row) => transformLead(row, maps));
     try {
-      await flushBatchWithRetry(targetConn, transformed, maps);
+      await flushBatchWithRetry(targetConn, transformed, maps, { preserveLeadIds });
     } catch (err) {
       throw new Error(`Batch after idLead ${cursor}: ${err.message}`);
     }
@@ -376,6 +402,8 @@ async function main() {
         return;
       }
 
+      const preserveLeadIds = await collectExistingLeadIds(targetConn, db, opts.year);
+
       if (!opts.skipDelete) {
         console.log('Paso 1: borrar hijos + lead del año…');
         const deleted = await deleteYearLeads(targetConn, db, opts.year);
@@ -418,6 +446,7 @@ async function main() {
         limit: opts.limit,
         fromProd: opts.fromProd,
         afterId,
+        preserveLeadIds,
         onProgress(done, tot) {
           const pct = ((done / tot) * 100).toFixed(1);
           process.stdout.write(`\r  ${done}/${tot} (${pct}%)`);

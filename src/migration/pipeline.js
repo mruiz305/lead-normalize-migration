@@ -492,9 +492,16 @@ function relinkLeadId(item, leadId) {
   for (const psn of item.passengers || []) psn.party[0] = leadId;
 }
 
-async function flushLeadBatch(targetConn, items, maps) {
+/**
+ * preserveLeadIds: Map de glide_id → id_lead ya existente. Lo pasan los
+ * remigrate, que borran y reinsertan el lead: sin él, AUTO_INCREMENT le da un
+ * PK nuevo y cualquier referencia externa al lead queda apuntando al vacío.
+ */
+async function flushLeadBatch(targetConn, items, maps, { preserveLeadIds = null } = {}) {
   if (!items.length) return;
   const db = config.target.database;
+  const keptLeadId = (item) =>
+    preserveLeadIds ? preserveLeadIds.get(Number(item.leadId)) : undefined;
 
   const baseClientId = await bulkInsert(targetConn, db, 'client', [
     'first_name', 'last_name', 'display_name', 'date_of_birth', 'is_minor', 'preferred_language',
@@ -527,6 +534,9 @@ async function flushLeadBatch(targetConn, items, maps) {
   }
 
   const baseLeadId = await bulkInsert(targetConn, db, 'lead', [
+    // Explícito cuando rehacemos un lead que ya existía, NULL para que
+    // AUTO_INCREMENT lo asigne cuando es nuevo.
+    'id_lead',
     'glide_id', 'id_lead_status', 'id_stage', 'id_company_office', 'submitter_user_id',
     'referral_source', 'source_type', 'internal_source', 'case_type', 'accident_or_wc',
     'is_vip', 'is_hot_lead', 'hot_lead_start_at', 'boost_yn', 'confirmed', 'cnv_value',
@@ -538,10 +548,14 @@ async function flushLeadBatch(targetConn, items, maps) {
     // vuelve a derivar de glide_id: la base es la autoridad, para que un
     // proceso desactualizado no marque leads de Glide como del portal.
     'updated_by_user_id', 'updated_at', 'origin',
-  ], items.map((i) => [...i.lead, 'GLIDE']));
+  ], items.map((i) => [keptLeadId(i) ?? null, ...i.lead, 'GLIDE']));
 
-  items.forEach((item, idx) => {
-    item._leadId = baseLeadId + idx;
+  // insertId es el primer id que AUTO_INCREMENT generó en esta sentencia. Las
+  // filas con id explícito no consumen el contador, así que solo avanza para
+  // las que fueron con NULL.
+  let nextAutoLeadId = baseLeadId;
+  items.forEach((item) => {
+    item._leadId = keptLeadId(item) ?? nextAutoLeadId++;
     relinkLeadId(item, item._leadId);
   });
 
