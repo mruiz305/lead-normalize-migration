@@ -60,12 +60,14 @@ async function loadCompanyOfficeMap(targetConn) {
 
 async function flushMemberships(targetConn, tgtDb, batch) {
   if (!batch.length) return 0;
+  // IGNORE porque la clave única no incluye el origen: si la app nueva ya
+  // administra esa misma membresía, la suya gana y la derivada se descarta.
   const head = `
-    INSERT INTO \`${tgtDb}\`.hierarchy_membership
-      (user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader, is_primary, is_active)
+    INSERT IGNORE INTO \`${tgtDb}\`.hierarchy_membership
+      (user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader, is_primary, is_active, origin)
     VALUES
   `;
-  const placeholder = '(?, ?, ?, ?, ?, ?, 1)';
+  const placeholder = "(?, ?, ?, ?, ?, ?, 1, 'GLIDE')";
   let inserted = 0;
   for (let i = 0; i < batch.length; i += BATCH_SIZE) {
     const chunk = batch.slice(i, i + BATCH_SIZE);
@@ -116,9 +118,18 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
   const gUsers = await loadGUsers(sourceConn);
 
   if (truncate) {
-    await targetConn.query('SET FOREIGN_KEY_CHECKS = 0');
-    await targetConn.query(`TRUNCATE TABLE \`${tgtDb}\`.hierarchy_membership`);
-    await targetConn.query('SET FOREIGN_KEY_CHECKS = 1');
+    // Borra solo lo que este sync sabe rehacer. Las filas de origen PORTAL las
+    // administra la app nueva para usuarios que no existen en g_users, y un
+    // TRUNCATE se las llevaba en cada corrida — cada 3 minutos.
+    const [cleared] = await targetConn.query(
+      `DELETE FROM \`${tgtDb}\`.hierarchy_membership WHERE origin = 'GLIDE'`
+    );
+    const [[kept]] = await targetConn.query(
+      `SELECT COUNT(*) AS c FROM \`${tgtDb}\`.hierarchy_membership WHERE origin = 'PORTAL'`
+    );
+    if (kept.c) {
+      console.log(`  ${cleared.affectedRows} filas de Glide rehechas · ${kept.c} del portal intactas`);
+    }
   }
 
   const pending = [];

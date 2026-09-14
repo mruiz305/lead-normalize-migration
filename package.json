@@ -32,6 +32,7 @@
     "migrate:gaps": "node scripts/migrate-gaps.js",
     "patch:lead-glide-id": "node scripts/apply-lead-glide-id.js",
     "patch:lead-origin": "node scripts/apply-lead-origin.js",
+    "patch:hierarchy-origin": "node scripts/apply-hierarchy-origin.js",
     "patch:ref-sub-office": "node scripts/apply-ref-sub-office.js",
     "remigrate:year": "node scripts/remigrate-leads-year.js",
     "remigrate:year:prod": "node scripts/remigrate-leads-year.js --from-prod",
