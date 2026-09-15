@@ -93,6 +93,7 @@
     "sync:user-hr": "node scripts/sync-user-employment-history.js",
     "sync:user-employment": "node scripts/sync-user-employment-history.js",
     "sync:lead-status": "node scripts/sync-lead-status-history.js",
+    "sync:lead-status-log": "node scripts/sync-lead-status-log.js",
     "sync:lead-comments": "node scripts/sync-lead-comments.js",
     "patch:lead-status-event": "node scripts/sync-lead-status-history.js",
     "patch:clean-lead-status-event": "node scripts/apply-clean-lead-status-event.js",

@@ -7,13 +7,15 @@
  *   2) sync:users (g_users → app_user por rowId)
  *   3) sync:incremental
  *   4) migrate:gaps (src sin lead)
- *   5) backfill:attorney-miss
- *   6) sync:lead-comments -- --resume
+ *   5) sync:lead-status-log (insumo del ColorTag del datamart)
+ *   6) backfill:attorney-miss
+ *   7) sync:lead-comments -- --resume
  *
  * El datamart ETL es independiente (su propio cron: ETL_DM_CRON).
  *
  * Opcionales: --with-catalogs --with-legacy-ops
  *             --skip-attorney --skip-users --skip-leads --skip-comments --skip-backfill
+ *             --skip-status-log
  *
  * Uso:
  *   npm run sync:ops
@@ -36,6 +38,7 @@ function parseArgs(argv) {
     skipLeads: argv.includes('--skip-leads'),
     skipComments: argv.includes('--skip-comments'),
     skipBackfill: argv.includes('--skip-backfill'),
+    skipStatusLog: argv.includes('--skip-status-log'),
     since: (() => {
       const i = argv.indexOf('--since');
       return i >= 0 ? argv[i + 1] : null;
@@ -82,6 +85,9 @@ function plan(opts) {
     if (opts.hours) leadArgs.push('--hours', String(opts.hours));
     steps.push({ script: 'sync:incremental', args: leadArgs });
     steps.push({ script: 'migrate:gaps', args: [] });
+    // Después de gaps: los logs cuelgan del lead, y uno que todavía no migró
+    // deja su fila afuera hasta la corrida siguiente.
+    if (!opts.skipStatusLog) steps.push({ script: 'sync:lead-status-log', args: [] });
   }
   if (!opts.skipBackfill) steps.push({ script: 'backfill:attorney-miss', args: [] });
   if (!opts.skipComments) {
