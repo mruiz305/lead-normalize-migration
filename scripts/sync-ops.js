@@ -7,7 +7,7 @@
  *   2) sync:users (g_users → app_user por rowId)
  *   3) sync:incremental
  *   4) migrate:gaps (src sin lead)
- *   5) sync:lead-status-log (insumo del ColorTag del datamart)
+ *   5) sync:glide-mirrors (estado operativo y legal que el tablero lee)
  *   6) backfill:attorney-miss
  *   7) sync:lead-comments -- --resume
  *
@@ -15,7 +15,7 @@
  *
  * Opcionales: --with-catalogs --with-legacy-ops
  *             --skip-attorney --skip-users --skip-leads --skip-comments --skip-backfill
- *             --skip-status-log
+ *             --skip-mirrors
  *
  * Uso:
  *   npm run sync:ops
@@ -38,7 +38,7 @@ function parseArgs(argv) {
     skipLeads: argv.includes('--skip-leads'),
     skipComments: argv.includes('--skip-comments'),
     skipBackfill: argv.includes('--skip-backfill'),
-    skipStatusLog: argv.includes('--skip-status-log'),
+    skipMirrors: argv.includes('--skip-mirrors'),
     since: (() => {
       const i = argv.indexOf('--since');
       return i >= 0 ? argv[i + 1] : null;
@@ -85,9 +85,9 @@ function plan(opts) {
     if (opts.hours) leadArgs.push('--hours', String(opts.hours));
     steps.push({ script: 'sync:incremental', args: leadArgs });
     steps.push({ script: 'migrate:gaps', args: [] });
-    // Después de gaps: los logs cuelgan del lead, y uno que todavía no migró
-    // deja su fila afuera hasta la corrida siguiente.
-    if (!opts.skipStatusLog) steps.push({ script: 'sync:lead-status-log', args: [] });
+    // Después de gaps: los espejos cuelgan del lead, y uno que todavía no
+    // migró deja su fila afuera hasta la corrida siguiente.
+    if (!opts.skipMirrors) steps.push({ script: 'sync:glide-mirrors', args: [] });
   }
   if (!opts.skipBackfill) steps.push({ script: 'backfill:attorney-miss', args: [] });
   if (!opts.skipComments) {
