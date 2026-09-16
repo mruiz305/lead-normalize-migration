@@ -50,6 +50,7 @@ const SPEC = {
     // bit(1) llega como Buffer; lo normalizamos a 0/1.
     r.isMiscellaneous == null ? null : Number(r.isMiscellaneous[0] ?? r.isMiscellaneous),
   ],
+  uniqueLead: true,
 };
 
 function syncLeadLegalClinicalStatus(sourceConn, targetConn, opts = {}) {
