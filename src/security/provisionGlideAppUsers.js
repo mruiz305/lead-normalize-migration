@@ -1,5 +1,7 @@
 /**
- * Altas g_users → SECURITY_TNFG.users (sin roles).
+ * Altas g_users → SECURITY_TNFG.users (sin roles) y espejo de is_active.
+ * Termed/Inactive en Glide apaga la persona para que no entre; si vuelven a
+ * Active y ya existía, se reactiva la misma fila (no se crea otra).
  * Misma conexión que INTAKE (mismo host). No requiere variables nuevas en .env.
  */
 const config = require('../config');
@@ -47,6 +49,16 @@ async function ensureExternalLink(conn, idPersona, idUser) {
   }
 }
 
+async function setPersonaActive(conn, idPersona, isActive) {
+  const flag = isActive ? 1 : 0;
+  await conn.query(
+    `UPDATE \`${SECURITY_DB}\`.users
+     SET is_active = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND is_active <> ?`,
+    [flag, idPersona, flag]
+  );
+}
+
 /**
  * @param {import('mysql2/promise').PoolConnection} targetConn
  * @param {Array<{ idUser: number, email: string, displayName?: string, hrStatus?: string }>} inserts
@@ -65,6 +77,7 @@ async function provisionSecurityForGlideInserts(targetConn, inserts = []) {
     const email = normEmail(u.email);
     const idUser = Number(u.idUser);
     if (!email || !idUser) continue;
+    const active = isActiveHr(u.hrStatus);
 
     try {
       const [existing] = await targetConn.query(
@@ -75,13 +88,14 @@ async function provisionSecurityForGlideInserts(targetConn, inserts = []) {
       let idPersona;
       if (existing[0]) {
         idPersona = Number(existing[0].id);
+        await setPersonaActive(targetConn, idPersona, active);
         linked += 1;
       } else {
         const [ins] = await targetConn.query(
           `INSERT INTO \`${SECURITY_DB}\`.users
              (tenant_id, email, display_name, person_kind, is_active)
            VALUES (?, ?, ?, 'STAFF_INTERNO', ?)`,
-          [TENANT_ID, email, displayNameOf(u), isActiveHr(u.hrStatus)]
+          [TENANT_ID, email, displayNameOf(u), active]
         );
         idPersona = Number(ins.insertId);
         if (!idPersona) throw new Error('users insert without id');
@@ -106,4 +120,80 @@ async function provisionSecurityForGlideInserts(targetConn, inserts = []) {
   return { skipped: false, created, linked, errors };
 }
 
-module.exports = { provisionSecurityForGlideInserts };
+/**
+ * Espeja app_user.is_active → SECURITY.users.is_active para personas ya ligadas.
+ * Termed: apaga y revoca sesiones. Active de nuevo: reactiva la misma persona.
+ */
+async function syncSecurityActiveFromAppUsers(targetConn) {
+  const tgtDb = config.target.database;
+
+  const [deactivated] = await targetConn.query(
+    `UPDATE \`${SECURITY_DB}\`.users u
+     INNER JOIN \`${tgtDb}\`.app_user a ON a.id_persona = u.id
+     SET u.is_active = 0, u.updated_at = CURRENT_TIMESTAMP
+     WHERE a.id_persona IS NOT NULL AND a.id_persona <> 0
+       AND a.is_active = 0 AND u.is_active = 1`
+  );
+
+  const [reactivated] = await targetConn.query(
+    `UPDATE \`${SECURITY_DB}\`.users u
+     INNER JOIN \`${tgtDb}\`.app_user a ON a.id_persona = u.id
+     SET u.is_active = 1, u.updated_at = CURRENT_TIMESTAMP
+     WHERE a.id_persona IS NOT NULL AND a.id_persona <> 0
+       AND a.is_active = 1 AND u.is_active = 0`
+  );
+
+  let sessionsRevoked = 0;
+  const [sessTables] = await targetConn.query(
+    `SELECT 1 FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'sessions' LIMIT 1`,
+    [SECURITY_DB]
+  );
+  if (sessTables.length) {
+    const [revoked] = await targetConn.query(
+      `UPDATE \`${SECURITY_DB}\`.sessions s
+       INNER JOIN \`${tgtDb}\`.app_user a ON a.id_persona = s.user_id
+       SET s.revoked_at = NOW()
+       WHERE a.id_persona IS NOT NULL AND a.id_persona <> 0
+         AND a.is_active = 0 AND s.revoked_at IS NULL`
+    );
+    sessionsRevoked = Number(revoked.affectedRows) || 0;
+  }
+
+  let credentialsOff = 0;
+  const [credTables] = await targetConn.query(
+    `SELECT 1 FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = 'user_credentials' LIMIT 1`,
+    [SECURITY_DB]
+  );
+  if (credTables.length) {
+    const [creds] = await targetConn.query(
+      `UPDATE \`${SECURITY_DB}\`.user_credentials c
+       INNER JOIN \`${tgtDb}\`.app_user a ON a.id_persona = c.user_id
+       SET c.is_active = a.is_active, c.updated_at = CURRENT_TIMESTAMP
+       WHERE a.id_persona IS NOT NULL AND a.id_persona <> 0
+         AND c.is_active <> a.is_active`
+    );
+    credentialsOff = Number(creds.affectedRows) || 0;
+  }
+
+  return {
+    skipped: false,
+    deactivated: Number(deactivated.affectedRows) || 0,
+    reactivated: Number(reactivated.affectedRows) || 0,
+    sessionsRevoked,
+    credentialsUpdated: credentialsOff,
+  };
+}
+
+async function syncSecurityForGlideAppUsers(targetConn, inserts = []) {
+  const provision = await provisionSecurityForGlideInserts(targetConn, inserts);
+  const active = await syncSecurityActiveFromAppUsers(targetConn);
+  return { ...provision, ...active };
+}
+
+module.exports = {
+  provisionSecurityForGlideInserts,
+  syncSecurityActiveFromAppUsers,
+  syncSecurityForGlideAppUsers,
+};
