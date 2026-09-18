@@ -147,6 +147,7 @@ const INSERT_COLUMNS = `
 `;
 
 const UPDATE_ASSIGNMENTS = `
+  legacy_row_id = COALESCE(VALUES(legacy_row_id), legacy_row_id),
   display_name = VALUES(display_name),
   nick = VALUES(nick),
   email = VALUES(email),
@@ -235,13 +236,21 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
     `SELECT COUNT(*) AS beforeCount FROM \`${tgt}\`.app_user`
   );
   const [existing] = await targetConn.query(
-    `SELECT id_user, legacy_row_id FROM \`${tgt}\`.app_user
-     WHERE legacy_row_id IS NOT NULL AND TRIM(legacy_row_id) <> ''`
+    `SELECT id_user, legacy_row_id, email FROM \`${tgt}\`.app_user`
   );
-  const existingByRowId = new Map(
-    existing.map((r) => [normRowId(r.legacy_row_id), Number(r.id_user)])
-  );
-  const existingIds = new Set(existing.map((r) => Number(r.id_user)));
+  const existingByRowId = new Map();
+  const existingByEmailNoRow = new Map();
+  const existingIds = new Set();
+  for (const r of existing) {
+    const id = Number(r.id_user);
+    existingIds.add(id);
+    const rid = normRowId(r.legacy_row_id);
+    if (rid) existingByRowId.set(rid, id);
+    const em = normText(r.email);
+    if (em && !rid && !existingByEmailNoRow.has(em.toLowerCase())) {
+      existingByEmailNoRow.set(em.toLowerCase(), id);
+    }
+  }
 
   const [[{ maxId }]] = await targetConn.query(
     `SELECT COALESCE(MAX(id_user), 0) AS maxId FROM \`${tgt}\`.app_user`
@@ -255,9 +264,14 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
 
   for (const r of usableRows) {
     const rowId = normRowId(r.rowId);
-    const existingId = existingByRowId.get(rowId);
+    const emailKey = (normText(r.email) || '').toLowerCase();
+    const existingId =
+      existingByRowId.get(rowId) ??
+      (emailKey ? existingByEmailNoRow.get(emailKey) : null) ??
+      null;
     if (existingId != null) {
       toUpdate.push({ row: r, idUser: existingId });
+      if (emailKey) existingByEmailNoRow.delete(emailKey);
     } else if (!activeOnlyInserts || isActiveStatus(r.hrStatus)) {
       let idUser = Number(r.id);
       if (!idUser || existingIds.has(idUser)) {
@@ -319,6 +333,12 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
     : await targetConn.query(`SELECT COUNT(*) AS afterCount FROM \`${tgt}\`.app_user`);
 
   const activeCanonical = usableRows.filter((r) => isActiveStatus(r.hrStatus)).length;
+  const insertedUsers = toInsert.map(({ row, idUser }) => ({
+    idUser,
+    email: normText(row.email),
+    displayName: normText(row.name),
+    hrStatus: row.hrStatus,
+  }));
 
   return {
     sourceRows: rows.length,
@@ -328,6 +348,7 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
     skippedNoEmail,
     remappedIds,
     inserted: toInsert.length,
+    insertedUsers,
     updated: toUpdate.length,
     skippedTermedNew,
     upserted: dryRun ? 0 : upserted,

@@ -24,6 +24,17 @@ function isActiveHr(hrStatus) {
   return !/term|inactive/i.test(String(hrStatus));
 }
 
+function hasGlideHierarchy(gu) {
+  return Boolean(
+    normEmail(gu.hierarchyDirectorate) ||
+      normEmail(gu.hierarchyRegion) ||
+      normEmail(gu.hierarchyOffice) ||
+      normEmail(gu.hierarchyPod) ||
+      normEmail(gu.hierarchyTeam) ||
+      normEmail(gu.hierarchyDuo)
+  );
+}
+
 async function loadGUsers(sourceConn) {
   const srcDb = config.source.database;
   const [rows] = await sourceConn.query(`
@@ -69,8 +80,11 @@ async function loadCompanyOfficeMap(targetConn) {
  * ganarle a lo que haya escrito el portal, y dejar las dos versiones le daría
  * al usuario dos jefes en el mismo nivel.
  *
- * Lo que sobrevive es la jerarquía de los usuarios que g_users no conoce —
- * los que nacen en el portal, que antes se perdían en cada TRUNCATE.
+ * Lo que sobrevive es la jerarquía PORTAL de usuarios que g_users aún no
+ * trae con hierarchy* (alta nueva: el espejo SQL llega antes que los emails
+ * del jefe). Si se los mete al rebuild solo por oficina de app_user, el sync
+ * borra TEAM/POD y deja OFFICE vacío — y en el portal parece que “no trajo
+ * la jerarquía”.
  */
 async function clearDerived(targetConn, tgtDb, userIds) {
   await targetConn.query(
@@ -102,7 +116,7 @@ async function flushMemberships(targetConn, tgtDb, batch) {
       (user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader, is_primary, is_active, origin)
     VALUES
   `;
-  const placeholder = "(?, ?, ?, ?, ?, ?, 1, 'GLIDE')";
+  const placeholder = "(?, ?, ?, ?, ?, ?, ?, 'GLIDE')";
   let inserted = 0;
   for (let i = 0; i < batch.length; i += BATCH_SIZE) {
     const chunk = batch.slice(i, i + BATCH_SIZE);
@@ -135,9 +149,12 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
 
   const officeByCode = await loadCompanyOfficeMap(targetConn);
 
+  // Include inactive users: Glide still points hierarchy* emails at termed
+  // managers (e.g. 1800 → jvluque). Restricting to is_active=1 dropped TEAM/POD
+  // and left OFFICE without leader_user_id, so the portal showed empty hierarchy.
   const [appUsers] = await targetConn.query(
-    `SELECT id_user, email, legacy_row_id, id_company_office
-     FROM \`${tgtDb}\`.app_user WHERE is_active = 1`
+    `SELECT id_user, email, legacy_row_id, id_company_office, is_active
+     FROM \`${tgtDb}\`.app_user`
   );
   const userById = new Map();
   const userByRowId = new Map();
@@ -147,7 +164,11 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     const rid = u.legacy_row_id ? String(u.legacy_row_id).trim() : '';
     if (rid) userByRowId.set(rid, u);
     const em = normEmail(u.email);
-    if (em && !userByEmail.has(em)) userByEmail.set(em, u);
+    if (!em) continue;
+    const prev = userByEmail.get(em);
+    if (!prev || (Number(prev.is_active) !== 1 && Number(u.is_active) === 1)) {
+      userByEmail.set(em, u);
+    }
   }
 
   const gUsers = await loadGUsers(sourceConn);
@@ -155,9 +176,10 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
   const pending = [];
   const seen = new Set();
 
-  function queue(userId, level, idCompanyOffice, leaderUserId, isLeader, isPrimary = 0) {
+  function queue(userId, level, idCompanyOffice, leaderUserId, isLeader, isPrimary = 0, isActive = 1) {
     if (!userId || !level) return;
     const leaderFlag = isLeader ? 1 : 0;
+    const activeFlag = isActive ? 1 : 0;
     // At most one primary member row per user+level.
     if (!leaderFlag && isPrimary) {
       const primaryKey = `primary:${userId}:${level}`;
@@ -167,15 +189,22 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     const key = `${userId}:${level}:${idCompanyOffice ?? ''}:${leaderUserId ?? ''}:${leaderFlag}`;
     if (seen.has(key)) return;
     seen.add(key);
-    pending.push([userId, level, idCompanyOffice, leaderUserId, leaderFlag, isPrimary ? 1 : 0]);
+    pending.push([userId, level, idCompanyOffice, leaderUserId, leaderFlag, isPrimary ? 1 : 0, activeFlag]);
   }
 
   let memberCount = 0;
   for (const gu of gUsers) {
-    if (!isActiveHr(gu.hrStatus)) continue;
     const rowId = gu.rowId ? String(gu.rowId).trim() : '';
-    const appUser = userById.get(Number(gu.id)) || (rowId ? userByRowId.get(rowId) : null);
+    // rowId is the sync key; g_users.id may be remapped in app_user.
+    const appUser =
+      (rowId ? userByRowId.get(rowId) : null) || userById.get(Number(gu.id)) || null;
     if (!appUser) continue;
+    // Sin emails de jefe en g_users todavía: no encolar (ni borrar PORTAL).
+    if (!hasGlideHierarchy(gu)) continue;
+
+    // Termed: keep last Glide snapshot (is_active=0) so UM still shows
+    // team/pod/office at inactivation. Live org stays on is_active=1.
+    const memberActive = isActiveHr(gu.hrStatus) ? 1 : 0;
 
     const idOffice =
       appUser.id_company_office ??
@@ -192,10 +221,10 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     // One OFFICE member row only (primary). Do NOT also queue a null-office duplicate —
     // that made fetchSubmitterDetail LIMIT 1 nondeterministic and froze wrong org on create.
     if (idOffice) {
-      queue(appUser.id_user, LEVEL.OFFICE, idOffice, leaderOfficeId, false, 1);
+      queue(appUser.id_user, LEVEL.OFFICE, idOffice, leaderOfficeId, false, 1, memberActive);
       memberCount += 1;
     } else if (leaderOfficeId && leaderOfficeId !== appUser.id_user) {
-      queue(appUser.id_user, LEVEL.OFFICE, null, leaderOfficeId, false, 1);
+      queue(appUser.id_user, LEVEL.OFFICE, null, leaderOfficeId, false, 1, memberActive);
       memberCount += 1;
     }
 
@@ -209,7 +238,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     ];
     for (const [level, leaderId] of leaderByLevel) {
       if (!leaderId || leaderId === appUser.id_user) continue;
-      queue(appUser.id_user, level, null, leaderId, false, 1);
+      queue(appUser.id_user, level, null, leaderId, false, 1, memberActive);
     }
   }
 

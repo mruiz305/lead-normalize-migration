@@ -14,6 +14,7 @@ const { withTarget, withSource, closeAll } = require('../src/db');
 const { upsertAppUsersFromGUsers } = require('../src/migration/appUserSync');
 const { populateHierarchyMembership } = require('../src/migration/hierarchyMembership');
 const { syncUserChannelsFromGUsers } = require('../src/migration/userChannelSync');
+const { provisionSecurityForGlideInserts } = require('../src/security/provisionGlideAppUsers');
 
 async function tableExists(conn, db, table) {
   const [rows] = await conn.query(
@@ -29,6 +30,7 @@ async function main() {
   const activeOnlyInserts = process.argv.includes('--active-only');
   const skipHierarchy = process.argv.includes('--skip-hierarchy');
   const skipChannels = process.argv.includes('--skip-channels');
+  const skipSecurity = process.argv.includes('--skip-security');
 
   console.log('sync:users — g_users → app_user (rowId)');
   console.log(`  Origen:  ${config.source.host}/${config.source.database}`);
@@ -73,8 +75,27 @@ async function main() {
       }
 
       if (dryRun) {
-        console.log('\n(dry-run) no se actualizó hierarchy ni channels');
+        console.log('\n(dry-run) no se actualizó hierarchy, channels ni security');
+        if (stats.insertedUsers?.length) {
+          console.log(`  (dry-run) ${stats.insertedUsers.length} altas irían a SECURITY sin roles`);
+        }
         return;
+      }
+
+      if (!skipSecurity) {
+        console.log('\n  SECURITY_TNFG (altas Glide, sin roles)…');
+        const secStats = await provisionSecurityForGlideInserts(
+          targetConn,
+          stats.insertedUsers || []
+        );
+        if (secStats.skipped) {
+          console.log(`  ⚠ security omitido (${secStats.reason})`);
+        } else {
+          console.log(
+            `  ✓ security: ${secStats.created} personas nuevas, ${secStats.linked} enlazadas` +
+              (secStats.errors ? `, ${secStats.errors} errores` : '')
+          );
+        }
       }
 
       if (!skipHierarchy) {
