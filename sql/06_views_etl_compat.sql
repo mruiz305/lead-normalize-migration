@@ -6,6 +6,7 @@
 
 -- ---------------------------------------------------------------------------
 -- g_users ← app_user + hierarchy_membership + catálogos
+-- (tabla 1:1 de Glide: npm run copy:g-users — no usar a la vez que esta vista)
 -- ---------------------------------------------------------------------------
 DROP VIEW IF EXISTS g_users;
 CREATE VIEW g_users AS
@@ -199,12 +200,14 @@ DROP VIEW IF EXISTS tblLeadComments;
 CREATE VIEW tblLeadComments AS
 SELECT
   n.id_note AS idComment,
-  n.id_lead AS IdLead,
+  l.glide_id AS IdLead,
   n.body AS comment,
   n.posted_at AS posted,
   n.posted_by AS postedBy
 FROM lead_note n
-WHERE n.note_type = 'comment';
+INNER JOIN `lead` l ON l.id_lead = n.id_lead
+WHERE n.note_type = 'comment'
+  AND l.glide_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- tblLeadsDataLegalClinicalStatus ← snapshot vigente legal/clinical
@@ -214,8 +217,8 @@ DROP VIEW IF EXISTS tblLeadsDataLegalClinicalStatus;
 CREATE VIEW tblLeadsDataLegalClinicalStatus AS
 SELECT
   l.id_lead AS Id,
-  l.id_lead AS IdLead,
-  CAST(l.id_lead AS CHAR) AS IdLeadStr,
+  l.glide_id AS IdLead,
+  CAST(l.glide_id AS CHAR) AS IdLeadStr,
   l.id_lead_old AS IdLeadOld,
   COALESCE(ra.display_name, ir.attorney_raw) AS Attorney,
   COALESCE(rtl.display_name, ir.tx_raw) AS TxLocation,
@@ -250,7 +253,8 @@ LEFT JOIN (
   FROM import_reject
   WHERE field_name IN ('attorney', 'tx_location')
   GROUP BY id_lead
-) ir ON ir.id_lead = l.id_lead;
+) ir ON ir.id_lead = l.id_lead
+WHERE l.glide_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- tblLeadsLogsStatus ← lead_status_event (dominio LEAD)
@@ -260,7 +264,7 @@ DROP VIEW IF EXISTS tblLeadsLogsStatus;
 CREATE VIEW tblLeadsLogsStatus AS
 SELECT
   e.event_id AS Id,
-  e.id_lead AS IdLead,
+  l.glide_id AS IdLead,
   l.id_lead_old AS IdLeadOld,
   CASE
     WHEN rls.leadStatus = 'Dropped' THEN 'DROPPED'
@@ -274,7 +278,8 @@ SELECT
 FROM lead_status_event e
 INNER JOIN `lead` l ON l.id_lead = e.id_lead
 LEFT JOIN refLeadStatus rls ON rls.idLeadStatus = e.id_status_to
-WHERE e.status_domain = 'LEAD';
+WHERE e.status_domain = 'LEAD'
+  AND l.glide_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- vIntakeSpecialistTestFilterDashboard — lista estática de emails de prueba

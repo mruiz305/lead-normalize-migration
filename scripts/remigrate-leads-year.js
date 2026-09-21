@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Borra leads de un año (por created) en el modelo normalizado y los vuelve a cargar.
- * No toca otros años.
+ * Actualiza leads de un año (por created) en el modelo: UPDATE `lead` y
+ * hijos in-place. No toca otros años.
  *
  * Origen:
  *   default      TNFG_INTAKE.tblLeads_src (copia local, puede estar desfasada)
@@ -22,6 +22,7 @@
  *   node scripts/remigrate-leads-year.js --year 2026 --delete-only
  *
  * Después (datamart): npm run sync -- --only tblLeads_mat  en tnfg-datamart-etl
+ * (`--only tblLeads_mat` rehace el snapshot FULL; el INC no basta).
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const config = require('../src/config');
@@ -30,6 +31,7 @@ const { loadCatalogMaps } = require('../src/migration/maps');
 const {
   LEAD_SELECT_COLUMNS,
   transformLead,
+  stampLeadUpdatedNow,
   flushLeadBatch,
 } = require('../src/migration/pipeline');
 const { syncInsuranceCatalog } = require('../src/migration/insurance');
@@ -185,8 +187,7 @@ async function collectYearIds(targetConn, db, year, { fromProd, sourceConn } = {
     [from, to]
   );
 
-  // Los ids que vinieron del lado de origen pueden ser el espejo de un lead del
-  // portal: borrarlos y reimportarlos lo reconstruiría desde una copia más pobre.
+  // Espejo de un lead del portal: no se actualiza desde la copia de prod.
   const [skipped] = await targetConn.query(`
     DELETE t FROM tmp_remigrate_year_ids t
     INNER JOIN \`${db}\`.\`lead\` l ON l.glide_id = t.id_lead
@@ -204,64 +205,7 @@ async function collectYearIds(targetConn, db, year, { fromProd, sourceConn } = {
   };
 }
 
-async function deleteYearLeads(conn, db, year) {
-  const childDirect = [
-    'lead_insurance',
-    'lead_note',
-    'lead_staff',
-    'lead_sync_flag',
-    'lead_status_event',
-    'lead_injury_site',
-    'lead_injury',
-    'lead_accident',
-    'lead_legal',
-    'lead_clinical',
-    'lead_timeline',
-    'lead_org_snapshot',
-    'import_reject',
-  ];
-
-  console.log('  lead_party_injury_site…');
-  const [r0] = await conn.query(`
-    DELETE lpis FROM \`${db}\`.lead_party_injury_site lpis
-    INNER JOIN \`${db}\`.lead_party lp ON lp.id_lead_party = lpis.id_lead_party
-    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
-    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = l.glide_id
-  `);
-  console.log(`    ${r0.affectedRows} filas`);
-
-  console.log('  lead_party…');
-  const [rParty] = await conn.query(`
-    DELETE lp FROM \`${db}\`.lead_party lp
-    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
-    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = l.glide_id
-  `);
-  console.log(`    ${rParty.affectedRows} filas`);
-
-  for (const table of childDirect) {
-    process.stdout.write(`  ${table}…`);
-    const [r] = await conn.query(`
-      DELETE c FROM \`${db}\`.\`${table}\` c
-      INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = c.id_lead
-      INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = l.glide_id
-    `);
-    console.log(` ${r.affectedRows}`);
-  }
-
-  console.log('  lead…');
-  const [rLead] = await conn.query(`
-    DELETE l FROM \`${db}\`.\`lead\` l
-    INNER JOIN tmp_remigrate_year_ids t ON t.id_lead = l.glide_id
-  `);
-  console.log(`    ${rLead.affectedRows} filas`);
-
-  return Number(rLead.affectedRows);
-}
-
-/**
- * glide_id → id_lead del año que está por rehacerse, leído antes del borrado
- * para que la reinserción no le cambie el PK a leads que siguen siendo el mismo.
- */
+/** glide_id → id_lead: el UPDATE usa este PK; no se recicla. */
 async function collectExistingLeadIds(targetConn, db, year) {
   const { from, to } = yearBounds(year);
   const [rows] = await targetConn.query(
@@ -310,7 +254,7 @@ async function remigrateYear(
     );
     if (!rows.length) break;
 
-    const transformed = rows.map((row) => transformLead(row, maps));
+    const transformed = rows.map((row) => stampLeadUpdatedNow(transformLead(row, maps)));
     try {
       await flushBatchWithRetry(targetConn, transformed, maps, { preserveLeadIds });
     } catch (err) {
@@ -351,7 +295,7 @@ async function main() {
   console.log(`  Destino: ${config.target.host}/${db}`);
   console.log(`  Origen:  ${originLabel}${opts.fromProd ? ' (producción)' : ' (staging local)'}`);
   console.log(`  Rango:   created >= ${from} AND created < ${to}`);
-  console.log(`  Modo:    ${opts.dryRun ? 'dry-run' : opts.deleteOnly ? 'delete-only' : 'delete+reload'}\n`);
+  console.log(`  Modo:    ${opts.dryRun ? 'dry-run' : 'update lead + hijos'}\n`);
 
   const needSource = opts.fromProd || (!opts.dryRun && !opts.deleteOnly);
 
@@ -398,40 +342,23 @@ async function main() {
       console.log(`  otros años (se conservan):  ${keep.c}\n`);
 
       if (opts.dryRun) {
-        console.log('(dry-run) no se borró ni migró nada');
+        console.log('(dry-run) no se actualizó nada');
+        return;
+      }
+
+      if (opts.deleteOnly) {
+        console.log('(--delete-only ignorado: ya no se borran hijos; se actualizan)');
         return;
       }
 
       const preserveLeadIds = await collectExistingLeadIds(targetConn, db, opts.year);
 
-      if (!opts.skipDelete) {
-        console.log('Paso 1: borrar hijos + lead del año…');
-        const deleted = await deleteYearLeads(targetConn, db, opts.year);
-        console.log(`  ✓ borrados ${deleted} leads\n`);
-      } else {
-        console.log('Paso 1: skip-delete\n');
-      }
-
-      if (opts.deleteOnly) {
-        console.log('(--delete-only) listo');
-        return;
-      }
-
-      let afterId = Number.isFinite(opts.afterId) && opts.afterId > 0 ? opts.afterId : 0;
-      if (opts.skipDelete && !afterId) {
-        const [[row]] = await targetConn.query(
-          `SELECT COALESCE(MAX(glide_id), 0) AS maxId
-           FROM \`${db}\`.\`lead\`
-           WHERE created_at >= ? AND created_at < ?`,
-          [from, to]
-        );
-        afterId = Number(row.maxId) || 0;
-      }
+      const afterId = Number.isFinite(opts.afterId) && opts.afterId > 0 ? opts.afterId : 0;
       if (afterId) {
-        console.log(`  resume desde idLead > ${afterId} (no se reinsertan los ya cargados)\n`);
+        console.log(`  resume desde idLead > ${afterId}\n`);
       }
 
-      console.log('Paso 2: catálogos / maps…');
+      console.log('Paso 1: catálogos / maps…');
       console.log('  org snapshot ← tblLeads (no g_users / hierarchy_membership)');
       await syncInsuranceCatalog(sourceConn, targetConn, { truncate: false, afterId: 0 });
       await seedAccidentLocationTypes(targetConn);
@@ -440,7 +367,7 @@ async function main() {
       await syncInjurySiteCatalog(sourceConn, targetConn, { truncate: false });
       const maps = await loadCatalogMaps(targetConn);
 
-      console.log(`Paso 3: migrar año ${opts.year} desde ${opts.fromProd ? 'prod' : 'staging'}…`);
+      console.log(`Paso 2: actualizar año ${opts.year} desde ${opts.fromProd ? 'prod' : 'staging'}…`);
       const started = Date.now();
       const result = await remigrateYear(sourceConn, targetConn, maps, opts.year, {
         limit: opts.limit,
@@ -470,7 +397,7 @@ async function main() {
         [from, to]
       );
       console.log(`\nPost: año ${opts.year}=${post.c} (${post.minId}→${post.maxId}) · otros años=${other.c}`);
-      console.log('\nSiguiente: datamart → npm run sync -- --only tblLeads_mat');
+      console.log('\nSiguiente: datamart → npm run sync -- --only tblLeads_mat  (FULL mat)');
     } finally {
       if (sourceConn) sourceConn.release();
     }

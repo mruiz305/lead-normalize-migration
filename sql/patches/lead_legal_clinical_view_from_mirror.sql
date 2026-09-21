@@ -9,16 +9,16 @@
 -- convertedValue viene del mismo lado por la misma razón: pesa en el Confirmed
 -- del tablero, y el l.cnv_value del modelo arrastra el mismo desfase.
 --
--- Id es la identidad de origen y la PK del staging del datamart. Ojo que
--- cambia de espacio: antes era id_lead, ahora es el Id de Glide. Repuntar esta
--- vista obliga a truncar stg_tblLeadsDataLegalClinicalStatus y resetear su
--- watermark, o quedan conviviendo filas de las dos numeraciones.
+-- Id es la identidad de origen (Id de Glide) y la PK del staging.
+-- IdLead es glide_lead_id, igual que v_tblLeads.idLead / prod.tblLeads.idLead.
+-- Repuntar esta vista obliga a truncar stg_tblLeadsDataLegalClinicalStatus y
+-- resetear su watermark, o quedan conviviendo filas de las dos numeraciones.
 
 CREATE OR REPLACE VIEW tblLeadsDataLegalClinicalStatus AS
 SELECT
   m.glide_status_id  AS Id,
-  m.id_lead          AS IdLead,
-  CAST(m.id_lead AS CHAR CHARSET utf8mb4) AS IdLeadStr,
+  m.glide_lead_id    AS IdLead,
+  CAST(m.glide_lead_id AS CHAR CHARSET utf8mb4) AS IdLeadStr,
   m.id_lead_old      AS IdLeadOld,
   m.attorney         AS Attorney,
   m.tx_location      AS TxLocation,

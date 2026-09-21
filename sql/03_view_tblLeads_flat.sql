@@ -3,7 +3,13 @@
 -- Columnas no migradas → NULL. attorney/txLocation usan import_reject si FK falló.
 -- `updated`: GREATEST de lead + satélites (+ notes/events) para incremental ETL
 --   (etl_table_config.changeColumn = 'updated').
+-- Agregados van en JOIN LATERAL (por id_lead), no en tablas derivadas globales.
+-- Los GROUP BY de 185k filas en el FROM hacían TEMPTABLE: el INSERT paginado
+-- a tblLeads_mat perdía ref_attorney (lookup por idLead sí lo traía).
 -- Alias `tblLeads` al final para que el ETL lea el nombre legacy sin remap.
+-- idLead = lead.glide_id (id de prod/Glide) para que el datamart compare 1:1.
+-- Leads solo-portal (glide_id NULL) no entran: 3 de esos id_lead chocan con
+-- glide_id de otro lead, y el tablero de prod no los tiene hasta el espejo.
 -- Aplicar: npm run apply-views
 -- =============================================================================
 
@@ -12,7 +18,7 @@ DROP VIEW IF EXISTS v_tblLeads;
 
 CREATE VIEW v_tblLeads AS
 SELECT
-  l.id_lead AS idLead,
+  l.glide_id AS idLead,
   c_inj.display_name AS name,
   c_inj.first_name AS firstName,
   c_inj.last_name AS lastName,
@@ -33,8 +39,8 @@ SELECT
   cl.postal_code AS zipCode,
   gs_acc.state_name AS accidentState,
   gs_rep.state_name AS repState,
-  st_sub.staff_key AS submitter,
-  st_sub.staff_display_name AS submitterName,
+  st.submitter_key AS submitter,
+  st.submitter_name AS submitterName,
   org.duo,
   org.team,
   org.pod,
@@ -65,11 +71,11 @@ SELECT
   l.internal_source AS internalSource,
   ll.signing_at AS signingDate,
   ll.date_signed AS dateSigned,
-  st_int.staff_key AS intakeSpecialist,
-  COALESCE(u_cre.email, st_cre.staff_key, st_sub.staff_key) AS creator,
+  st.intake_key AS intakeSpecialist,
+  COALESCE(u_cre.email, st.creator_key, st.submitter_key) AS creator,
   l.created_at AS created,
   lt.date_created AS dateCreated,
-  COALESCE(u_upd.email, st_upd.staff_key, u_cre.email, st_sub.staff_key) AS updater,
+  COALESCE(u_upd.email, st.updater_key, u_cre.email, st.submitter_key) AS updater,
   -- Watermark incremental: cualquier cambio en el grafo del lead mueve `updated`
   GREATEST(
     COALESCE(l.updated_at, l.created_at, CAST('1970-01-01' AS DATETIME)),
@@ -81,7 +87,7 @@ SELECT
     COALESCE(org.updated_at, CAST('1970-01-01' AS DATETIME)),
     COALESCE(lp_inj.updated_at, CAST('1970-01-01' AS DATETIME)),
     COALESCE(c_inj.updated_at, CAST('1970-01-01' AS DATETIME)),
-    COALESCE(notes_meta.max_note_at, CAST('1970-01-01' AS DATETIME)),
+    COALESCE(notes.max_note_at, CAST('1970-01-01' AS DATETIME)),
     COALESCE(evt_meta.max_event_at, CAST('1970-01-01' AS DATETIME))
   ) AS updated,
   rls.leadStatus,
@@ -280,9 +286,21 @@ LEFT JOIN refLegalStatus rlg ON rlg.idLegalStatus = ll.id_legal_status
 LEFT JOIN lead_clinical lc ON lc.id_lead = l.id_lead
 LEFT JOIN ref_tx_location rtl ON rtl.id_tx_location = lc.id_tx_location
 LEFT JOIN refClinicalStatus rcs ON rcs.idClinicalStatus = lc.id_clinical_status
-LEFT JOIN lead_insurance li_pip ON li_pip.id_lead = l.id_lead AND li_pip.insurance_role = 'PIP'
+LEFT JOIN LATERAL (
+  SELECT id_carrier, carrier_raw
+  FROM lead_insurance
+  WHERE id_lead = l.id_lead AND insurance_role = 'PIP'
+  ORDER BY id_lead_insurance
+  LIMIT 1
+) li_pip ON TRUE
 LEFT JOIN ref_insurance_carrier ric_pip ON ric_pip.id_carrier = li_pip.id_carrier
-LEFT JOIN lead_insurance li_af ON li_af.id_lead = l.id_lead AND li_af.insurance_role = 'AT_FAULT'
+LEFT JOIN LATERAL (
+  SELECT id_carrier, carrier_raw
+  FROM lead_insurance
+  WHERE id_lead = l.id_lead AND insurance_role = 'AT_FAULT'
+  ORDER BY id_lead_insurance
+  LIMIT 1
+) li_af ON TRUE
 LEFT JOIN ref_insurance_carrier ric_af ON ric_af.id_carrier = li_af.id_carrier
 LEFT JOIN lead_accident la ON la.id_lead = l.id_lead
 LEFT JOIN ref_accident_location_type ralt ON ralt.id_location_type = la.id_location_type
@@ -293,22 +311,24 @@ LEFT JOIN ref_severity_level ris ON ris.id_severity = la.id_personal_severity
 LEFT JOIN ref_state gs_acc ON gs_acc.id_state = la.id_accident_state
 LEFT JOIN ref_state gs_rep ON gs_rep.id_state = la.id_rep_state
 LEFT JOIN lead_injury li ON li.id_lead = l.id_lead
-LEFT JOIN (
-  SELECT
-    lis.id_lead,
-    GROUP_CONCAT(ris.display_name ORDER BY ris.display_name SEPARATOR ',') AS injuries
+LEFT JOIN LATERAL (
+  SELECT GROUP_CONCAT(ris.display_name ORDER BY ris.display_name SEPARATOR ',') AS injuries
   FROM lead_injury_site lis
   INNER JOIN ref_injury_site ris ON ris.id_injury_site = lis.id_injury_site
-  GROUP BY lis.id_lead
-) inj_sites ON inj_sites.id_lead = l.id_lead
+  WHERE lis.id_lead = l.id_lead
+) inj_sites ON TRUE
 LEFT JOIN lead_timeline lt ON lt.id_lead = l.id_lead
 
-LEFT JOIN lead_party lp_inj
-  ON lp_inj.id_lead = l.id_lead AND lp_inj.is_primary_party = 1 AND lp_inj.id_party_kind = 1
+LEFT JOIN LATERAL (
+  SELECT id_lead_party, id_client, updated_at
+  FROM lead_party
+  WHERE id_lead = l.id_lead AND is_primary_party = 1 AND id_party_kind = 1
+  ORDER BY id_lead_party
+  LIMIT 1
+) lp_inj ON TRUE
 LEFT JOIN client c_inj ON c_inj.id_client = lp_inj.id_client
-LEFT JOIN (
+LEFT JOIN LATERAL (
   SELECT
-    ca.id_client,
     ca.street,
     ca.unit,
     ca.city,
@@ -317,60 +337,37 @@ LEFT JOIN (
   FROM client_address ca
   INNER JOIN ref_address_kind ak ON ak.id_address_kind = ca.id_address_kind AND ak.kind_code = 'RESIDENCE'
   LEFT JOIN ref_state gs ON gs.id_state = ca.id_state
-  WHERE ca.is_primary = 1 AND ca.is_active = 1
-) cl ON cl.id_client = c_inj.id_client
+  WHERE ca.id_client = c_inj.id_client AND ca.is_primary = 1 AND ca.is_active = 1
+  ORDER BY ca.id_address
+  LIMIT 1
+) cl ON TRUE
 
-LEFT JOIN (
+LEFT JOIN LATERAL (
   SELECT
-    cc.id_client,
     MAX(CASE WHEN ct.type_code = 'PHONE_MOBILE' AND cc.is_primary = 1 THEN cc.channel_value END) AS phone,
     MAX(CASE WHEN ct.type_code = 'PHONE_INTAKE_RAW' THEN cc.channel_value END) AS originalPhoneEntry,
     MAX(CASE WHEN ct.type_code = 'PHONE_INTAKE_FORMATTED' THEN cc.channel_value END) AS formattedPhoneEntry,
     MAX(CASE WHEN ct.type_code = 'EMAIL_PERSONAL' AND cc.is_primary = 1 THEN cc.channel_value END) AS email
   FROM client_channel cc
   INNER JOIN ref_contact_channel_type ct ON ct.id_channel_type = cc.id_channel_type
-  GROUP BY cc.id_client
-) ch ON ch.id_client = c_inj.id_client
+  WHERE cc.id_client = c_inj.id_client
+) ch ON TRUE
 
-LEFT JOIN (
+LEFT JOIN LATERAL (
   SELECT
-    id_lead,
-    MAX(CASE WHEN id_staff_kind = 1 THEN staff_key END) AS staff_key,
-    MAX(CASE WHEN id_staff_kind = 1 THEN staff_display_name END) AS staff_display_name
+    MAX(CASE WHEN id_staff_kind = 1 THEN staff_key END) AS submitter_key,
+    MAX(CASE WHEN id_staff_kind = 1 THEN staff_display_name END) AS submitter_name,
+    MAX(CASE WHEN id_staff_kind = 2 THEN staff_key END) AS intake_key,
+    MAX(CASE WHEN id_staff_kind = 3 THEN staff_key END) AS creator_key,
+    MAX(CASE WHEN id_staff_kind = 4 THEN staff_key END) AS updater_key
   FROM lead_staff
-  WHERE id_staff_kind = 1
-  GROUP BY id_lead
-) st_sub ON st_sub.id_lead = l.id_lead
-LEFT JOIN (
-  SELECT
-    id_lead,
-    MAX(CASE WHEN id_staff_kind = 2 THEN staff_key END) AS staff_key
-  FROM lead_staff
-  WHERE id_staff_kind = 2
-  GROUP BY id_lead
-) st_int ON st_int.id_lead = l.id_lead
-LEFT JOIN (
-  SELECT
-    id_lead,
-    MAX(CASE WHEN id_staff_kind = 3 THEN staff_key END) AS staff_key
-  FROM lead_staff
-  WHERE id_staff_kind = 3
-  GROUP BY id_lead
-) st_cre ON st_cre.id_lead = l.id_lead
-LEFT JOIN (
-  SELECT
-    id_lead,
-    MAX(CASE WHEN id_staff_kind = 4 THEN staff_key END) AS staff_key
-  FROM lead_staff
-  WHERE id_staff_kind = 4
-  GROUP BY id_lead
-) st_upd ON st_upd.id_lead = l.id_lead
+  WHERE id_lead = l.id_lead
+) st ON TRUE
 LEFT JOIN app_user u_cre ON u_cre.id_user = l.created_by_user_id
 LEFT JOIN app_user u_upd ON u_upd.id_user = l.updated_by_user_id
 
-LEFT JOIN (
+LEFT JOIN LATERAL (
   SELECT
-    id_lead,
     MAX(CASE WHEN field_name = 'attorney' THEN raw_value END) AS attorney_raw,
     MAX(CASE WHEN field_name = 'tx_location' THEN raw_value END) AS tx_raw,
     MAX(CASE WHEN field_name = 'locationType' THEN raw_value END) AS location_type_raw,
@@ -379,16 +376,15 @@ LEFT JOIN (
     MAX(CASE WHEN field_name = 'propertyDamage' THEN raw_value END) AS property_damage_raw,
     MAX(CASE WHEN field_name = 'personalInjury' THEN raw_value END) AS personal_injury_raw
   FROM import_reject
-  WHERE field_name IN (
-    'attorney', 'tx_location', 'locationType', 'atFaultType', 'atFaultSubType',
-    'propertyDamage', 'personalInjury'
-  )
-  GROUP BY id_lead
-) ir ON ir.id_lead = l.id_lead
+  WHERE id_lead = l.id_lead
+    AND field_name IN (
+      'attorney', 'tx_location', 'locationType', 'atFaultType', 'atFaultSubType',
+      'propertyDamage', 'personalInjury'
+    )
+) ir ON TRUE
 
-LEFT JOIN (
+LEFT JOIN LATERAL (
   SELECT
-    id_lead,
     MAX(CASE WHEN flag_code = 'COR' THEN flag_value END) AS corProccesed,
     MAX(CASE WHEN flag_code = 'AFF' THEN flag_value END) AS affProccesed,
     MAX(CASE WHEN flag_code = 'ATTY' THEN flag_value END) AS attyProccesed,
@@ -397,89 +393,75 @@ LEFT JOIN (
     MAX(CASE WHEN flag_code = 'CAME_IN_EMAIL' THEN flag_value END) AS cameInEmailProccesed,
     MAX(CASE WHEN flag_code = 'DROPPED_EMAIL' THEN flag_value END) AS droppedEmailProccesed
   FROM lead_sync_flag
-  GROUP BY id_lead
-) sync ON sync.id_lead = l.id_lead
+  WHERE id_lead = l.id_lead
+) sync ON TRUE
 
-LEFT JOIN (
+LEFT JOIN LATERAL (
   SELECT
-    id_lead,
     MAX(CASE WHEN note_type = 'intake' THEN body END) AS leadNotes,
     MAX(CASE WHEN note_type = 'accident' THEN body END) AS accidentNotes,
-    MAX(CASE WHEN note_type = 'hospital' THEN body END) AS hospitalNotes
-  FROM lead_note
-  GROUP BY id_lead
-) notes ON notes.id_lead = l.id_lead
-
-LEFT JOIN (
-  SELECT
-    id_lead,
+    MAX(CASE WHEN note_type = 'hospital' THEN body END) AS hospitalNotes,
     MAX(COALESCE(updated_at, posted_at)) AS max_note_at
   FROM lead_note
-  GROUP BY id_lead
-) notes_meta ON notes_meta.id_lead = l.id_lead
+  WHERE id_lead = l.id_lead
+) notes ON TRUE
 
-LEFT JOIN (
-  SELECT
-    id_lead,
-    MAX(changed_at) AS max_event_at
+LEFT JOIN LATERAL (
+  SELECT MAX(changed_at) AS max_event_at
   FROM lead_status_event
-  GROUP BY id_lead
-) evt_meta ON evt_meta.id_lead = l.id_lead
+  WHERE id_lead = l.id_lead
+) evt_meta ON TRUE
 
 LEFT JOIN lead_party ps1 ON ps1.id_lead = l.id_lead AND ps1.id_party_kind = 2 AND ps1.party_sequence = 1
 LEFT JOIN client cp1 ON cp1.id_client = ps1.id_client
 LEFT JOIN ref_tx_location tx1 ON tx1.id_tx_location = ps1.id_tx_location
-LEFT JOIN (
-  SELECT cc.id_client, MAX(cc.channel_value) AS phone
+LEFT JOIN LATERAL (
+  SELECT MAX(cc.channel_value) AS phone
   FROM client_channel cc
   INNER JOIN ref_contact_channel_type ct ON ct.id_channel_type = cc.id_channel_type
-  WHERE ct.medium_code = 'PHONE' AND cc.is_primary = 1
-  GROUP BY cc.id_client
-) pch1 ON pch1.id_client = cp1.id_client
+  WHERE cc.id_client = cp1.id_client AND ct.medium_code = 'PHONE' AND cc.is_primary = 1
+) pch1 ON TRUE
 
 LEFT JOIN lead_party ps2 ON ps2.id_lead = l.id_lead AND ps2.id_party_kind = 2 AND ps2.party_sequence = 2
 LEFT JOIN client cp2 ON cp2.id_client = ps2.id_client
 LEFT JOIN ref_tx_location tx2 ON tx2.id_tx_location = ps2.id_tx_location
-LEFT JOIN (
-  SELECT cc.id_client, MAX(cc.channel_value) AS phone
+LEFT JOIN LATERAL (
+  SELECT MAX(cc.channel_value) AS phone
   FROM client_channel cc
   INNER JOIN ref_contact_channel_type ct ON ct.id_channel_type = cc.id_channel_type
-  WHERE ct.medium_code = 'PHONE' AND cc.is_primary = 1
-  GROUP BY cc.id_client
-) pch2 ON pch2.id_client = cp2.id_client
+  WHERE cc.id_client = cp2.id_client AND ct.medium_code = 'PHONE' AND cc.is_primary = 1
+) pch2 ON TRUE
 
 LEFT JOIN lead_party ps3 ON ps3.id_lead = l.id_lead AND ps3.id_party_kind = 2 AND ps3.party_sequence = 3
 LEFT JOIN client cp3 ON cp3.id_client = ps3.id_client
 LEFT JOIN ref_tx_location tx3 ON tx3.id_tx_location = ps3.id_tx_location
-LEFT JOIN (
-  SELECT cc.id_client, MAX(cc.channel_value) AS phone
+LEFT JOIN LATERAL (
+  SELECT MAX(cc.channel_value) AS phone
   FROM client_channel cc
   INNER JOIN ref_contact_channel_type ct ON ct.id_channel_type = cc.id_channel_type
-  WHERE ct.medium_code = 'PHONE' AND cc.is_primary = 1
-  GROUP BY cc.id_client
-) pch3 ON pch3.id_client = cp3.id_client
+  WHERE cc.id_client = cp3.id_client AND ct.medium_code = 'PHONE' AND cc.is_primary = 1
+) pch3 ON TRUE
 
 LEFT JOIN lead_party ps4 ON ps4.id_lead = l.id_lead AND ps4.id_party_kind = 2 AND ps4.party_sequence = 4
 LEFT JOIN client cp4 ON cp4.id_client = ps4.id_client
 LEFT JOIN ref_tx_location tx4 ON tx4.id_tx_location = ps4.id_tx_location
-LEFT JOIN (
-  SELECT cc.id_client, MAX(cc.channel_value) AS phone
+LEFT JOIN LATERAL (
+  SELECT MAX(cc.channel_value) AS phone
   FROM client_channel cc
   INNER JOIN ref_contact_channel_type ct ON ct.id_channel_type = cc.id_channel_type
-  WHERE ct.medium_code = 'PHONE' AND cc.is_primary = 1
-  GROUP BY cc.id_client
-) pch4 ON pch4.id_client = cp4.id_client
+  WHERE cc.id_client = cp4.id_client AND ct.medium_code = 'PHONE' AND cc.is_primary = 1
+) pch4 ON TRUE
 
 LEFT JOIN lead_party ps5 ON ps5.id_lead = l.id_lead AND ps5.id_party_kind = 2 AND ps5.party_sequence = 5
 LEFT JOIN client cp5 ON cp5.id_client = ps5.id_client
 LEFT JOIN ref_tx_location tx5 ON tx5.id_tx_location = ps5.id_tx_location
-LEFT JOIN (
-  SELECT cc.id_client, MAX(cc.channel_value) AS phone
+LEFT JOIN LATERAL (
+  SELECT MAX(cc.channel_value) AS phone
   FROM client_channel cc
   INNER JOIN ref_contact_channel_type ct ON ct.id_channel_type = cc.id_channel_type
-  WHERE ct.medium_code = 'PHONE' AND cc.is_primary = 1
-  GROUP BY cc.id_client
-) pch5 ON pch5.id_client = cp5.id_client;
+  WHERE cc.id_client = cp5.id_client AND ct.medium_code = 'PHONE' AND cc.is_primary = 1
+) pch5 ON TRUE
+WHERE l.glide_id IS NOT NULL;
 
 -- Nombre legacy que usa etl_table_config.srcTable = 'tblLeads'
 CREATE VIEW tblLeads AS

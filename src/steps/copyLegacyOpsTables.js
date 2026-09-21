@@ -10,6 +10,13 @@ const LEGACY_OPS_TABLES = [
   'tblLeadConflictCase',
   // Archive histórico (datamart ETL → stg_tblLeadsLogsDuplicateArchiveJun2025)
   'tblLeadsLogsDuplicateArchiveJun2025',
+  // Origin Old del LogReport. En INTAKE van como tablas: las vistas de
+  // Glide no se recrean (apuntarían a dbProduction). El ETL lee estos nombres.
+  'tblLeadsArchive',
+  'vtblLeadsArchive',
+  'vLogReportLeadsArchive',
+  // Usuarios Glide 1:1 (el ETL lee g_users; no es la vista desde app_user)
+  'g_users',
   // Cadena email (FK) + ops que el ETL lee desde TNFG_INTAKE
   'tblEmail',
   'tblEmailConfig',
@@ -20,9 +27,60 @@ const LEGACY_OPS_TABLES = [
 
 const DEFAULT_BATCH = Number(process.env.MIG_LEGACY_OPS_BATCH_SIZE || 5000);
 
+async function getSourceTableType(sourceConn, tableName) {
+  const src = config.source.database;
+  const [[row]] = await sourceConn.query(
+    `SELECT TABLE_TYPE AS t FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1`,
+    [src, tableName],
+  );
+  if (!row) throw new Error(`${src}.${tableName} no existe`);
+  return String(row.t).toUpperCase();
+}
+
+function quoteIdent(name) {
+  return `\`${String(name).replace(/`/g, '``')}\``;
+}
+
+/** Vista de Glide → BASE TABLE en INTAKE (mismo nombre, sin depender de prod). */
+async function materializeViewAsTable(sourceConn, targetConn, tableName) {
+  const src = config.source.database;
+  const tgt = config.target.database;
+
+  const [cols] = await sourceConn.query(
+    `SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE
+     FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+     ORDER BY ORDINAL_POSITION`,
+    [src, tableName],
+  );
+  if (!cols.length) {
+    throw new Error(`${tableName}: information_schema.COLUMNS vacío`);
+  }
+
+  const defs = cols.map((c) => {
+    const nullSql = c.IS_NULLABLE === 'NO' ? ' NOT NULL' : '';
+    return `${quoteIdent(c.COLUMN_NAME)} ${c.COLUMN_TYPE}${nullSql}`;
+  });
+
+  await targetConn.query('SET FOREIGN_KEY_CHECKS = 0');
+  await targetConn.query(`DROP VIEW IF EXISTS ${quoteIdent(tgt)}.${quoteIdent(tableName)}`);
+  await targetConn.query(`DROP TABLE IF EXISTS ${quoteIdent(tgt)}.${quoteIdent(tableName)}`);
+  await targetConn.query(
+    `CREATE TABLE ${quoteIdent(tgt)}.${quoteIdent(tableName)} (${defs.join(', ')})`,
+  );
+}
+
 async function recreateTableFromSource(sourceConn, targetConn, tableName) {
   const src = config.source.database;
   const tgt = config.target.database;
+  const tableType = await getSourceTableType(sourceConn, tableName);
+
+  if (tableType === 'VIEW') {
+    console.log(`  · origen es VIEW → se materializa como tabla`);
+    await materializeViewAsTable(sourceConn, targetConn, tableName);
+    return;
+  }
 
   const [createRows] = await sourceConn.query(
     `SHOW CREATE TABLE \`${src}\`.\`${tableName}\``,
@@ -33,6 +91,7 @@ async function recreateTableFromSource(sourceConn, targetConn, tableName) {
   }
 
   await targetConn.query('SET FOREIGN_KEY_CHECKS = 0');
+  await targetConn.query(`DROP VIEW IF EXISTS \`${tgt}\`.\`${tableName}\``);
   await targetConn.query(`DROP TABLE IF EXISTS \`${tgt}\`.\`${tableName}\``);
   await targetConn.query(createSql);
 }
@@ -61,7 +120,12 @@ async function copyTableData(
   const src = config.source.database;
   const tgt = config.target.database;
 
-  // JSON blobs (p.ej. tblLeadsAuditBuffer) estallan max_allowed_packet con batches grandes.
+  // Glide permite división por 0 en columnas generadas (DealGoal, etc.).
+  try {
+    await targetConn.query("SET SESSION sql_mode = 'NO_ENGINE_SUBSTITUTION'");
+  } catch (_) {
+    /* ignore */
+  }
   try {
     await targetConn.query('SET SESSION max_allowed_packet = 67108864');
     await sourceConn.query('SET SESSION max_allowed_packet = 67108864');
@@ -100,12 +164,22 @@ async function copyTableData(
   }
 
   const [colRows] = await sourceConn.query(
-    `SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS
+    `SELECT COLUMN_NAME, DATA_TYPE, EXTRA FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
      ORDER BY ORDINAL_POSITION`,
     [src, tableName],
   );
-  const cols = colRows.map((r) => r.COLUMN_NAME);
+  const generated = colRows.filter((r) =>
+    String(r.EXTRA || '').toUpperCase().includes('GENERATED'),
+  );
+  const cols = colRows
+    .filter((r) => !String(r.EXTRA || '').toUpperCase().includes('GENERATED'))
+    .map((r) => r.COLUMN_NAME);
+  if (generated.length) {
+    console.log(
+      `  · omitidas generadas: ${generated.map((r) => r.COLUMN_NAME).join(', ')}`,
+    );
+  }
   const hasJson = colRows.some((r) => String(r.DATA_TYPE).toLowerCase() === 'json');
   let effectiveBatch = hasJson
     ? Math.min(batchSize, Number(process.env.MIG_LEGACY_OPS_JSON_BATCH || 100))

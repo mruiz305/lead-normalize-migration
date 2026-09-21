@@ -1,7 +1,7 @@
 require("./helpers/env");
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { transformLead } = require("../src/migration/pipeline");
+const { transformLead, stampLeadUpdatedNow } = require("../src/migration/pipeline");
 const { buildMaps, rejectReasons, rejectFields } = require("./helpers/mapsStub");
 
 function baseLead(extra = {}) {
@@ -199,5 +199,15 @@ describe("transformLead flags y notas", () => {
       ["intake", "hospital"]
     );
     assert.equal(out.notes[0][2], "llamó el lunes");
+  });
+});
+
+describe("stampLeadUpdatedNow", () => {
+  it("mueve audit.updatedAt y el updated del lead para el INC de la mat", () => {
+    const out = transformLead(baseLead({ updated: "2024-01-15 10:00:00" }), buildMaps());
+    const at = new Date("2026-09-15T20:00:00Z");
+    stampLeadUpdatedNow(out, at);
+    assert.equal(out.audit.updatedAt, at);
+    assert.equal(out.lead[out.lead.length - 1], at);
   });
 });

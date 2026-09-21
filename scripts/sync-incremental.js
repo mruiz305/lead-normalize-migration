@@ -3,7 +3,7 @@
  * Proceso operativo: solo ingresa leads nuevos y re-migra los actualizados.
  *
  * 1) sync staging (tblLeads_src) desde prod
- * 2) remigrate leads con updated >= since (borra+recarga esos ids)
+ * 2) remigrate leads con updated >= since (UPDATE lead + hijos)
  * 3) migrate --resume (ids nuevos por si quedó alguno fuera del filtro updated)
  * 4) actualiza .sync-state.json
  *

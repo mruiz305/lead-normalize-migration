@@ -24,6 +24,8 @@
     "copy:tblLeads-src": "node scripts/copy-tblLeads-src.js",
     "sync:tblLeads-src": "node scripts/sync-tblLeads-src.js",
     "copy:lead-conflict-case": "node scripts/copy-legacy-ops-tables.js --only tblLeadConflictCase",
+    "copy:leads-archive": "node scripts/copy-legacy-ops-tables.js --only tblLeadsArchive vtblLeadsArchive vLogReportLeadsArchive",
+    "copy:g-users": "node scripts/copy-legacy-ops-tables.js --only g_users",
     "truncate": "node src/run.js truncate",
     "migrate": "node src/run.js migrate",
     "migrate:sample": "node src/run.js migrate --limit 500",

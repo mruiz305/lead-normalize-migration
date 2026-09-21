@@ -75,7 +75,9 @@ async function deleteSrcByIds(targetConn, ids) {
 async function deleteNormByIds(targetConn, ids) {
   let deleted = 0;
   for (let i = 0; i < ids.length; i += BATCH) {
-    deleted += await deleteLeadGraphBySourceIds(targetConn, ids.slice(i, i + BATCH));
+    deleted += await deleteLeadGraphBySourceIds(targetConn, ids.slice(i, i + BATCH), {
+      deleteLeadRow: true,
+    });
   }
   return deleted;
 }

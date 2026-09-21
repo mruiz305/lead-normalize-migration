@@ -12,13 +12,13 @@
 -- así que el upsert incremental sigue funcionando; row_changed_at es la
 -- columna por la que pagina.
 --
--- IdLead va en id_lead local, no en glide_id: el datamart cruza contra
--- stg_tblLeads, que sale de v_tblLeads y expone el PK local.
+-- IdLead es el id de Glide (glide_lead_id), igual que v_tblLeads.idLead, para
+-- que el datamart cruce logs contra stg_tblLeads / prod.tblLeads.
 
 CREATE OR REPLACE VIEW tblLeadsLogsStatus AS
 SELECT
   g.glide_log_id   AS Id,
-  g.id_lead        AS IdLead,
+  g.glide_lead_id  AS IdLead,
   g.id_lead_old    AS IdLeadOld,
   g.log_status     AS LogStatus,
   g.created_at     AS CreatedAt,

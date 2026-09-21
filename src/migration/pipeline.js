@@ -1,5 +1,15 @@
 const config = require('../config');
-const { bulkInsert, bulkInsertIgnore } = require('./bulkInsert');
+const { bulkInsert, bulkInsertIgnore, bulkUpdateByPk, bulkUpsert } = require('./bulkInsert');
+const {
+  loadExistingLeadGraph,
+  upsertPrimaryPeople,
+  upsertClientContacts,
+  upsertPassengers,
+  upsertStaff,
+  upsertNotes,
+  upsertInsurance,
+  upsertRejects,
+} = require('./existingLeadGraph');
 const { withFullAudit, withTimelineAudit } = require('./leadAudit');
 const { TYPE, resolveChannelTypeId } = require('./contactChannelTypes');
 const { resolveAddressKindId, KIND } = require('./addressKind');
@@ -9,6 +19,17 @@ const STAFF_CREATOR = 3;
 const STAFF_UPDATER = 4;
 const PARTY_INJURED = 1;
 const PARTY_CO_PASSENGER = 2;
+
+const LEAD_WRITE_COLUMNS = [
+  'glide_id', 'id_lead_status', 'id_stage', 'id_company_office', 'submitter_user_id',
+  'referral_source', 'source_type', 'internal_source', 'case_type', 'accident_or_wc',
+  'is_vip', 'is_hot_lead', 'hot_lead_start_at', 'boost_yn', 'confirmed', 'cnv_value',
+  'callback_id', 'callback_id_new', 'is_callback', 'is_callback_new',
+  'lead_sort_order', 'new_leads', 'id_media', 'link_to_lead_record', 'intake_view_stepper',
+  'id_acc', 'id_lead_old', 'employer', 'requested_drop',
+  'legacy_lead_id', 'legacy_case_id', 'created_by_user_id', 'created_at',
+  'updated_by_user_id', 'updated_at', 'origin',
+];
 
 const SYNC_FLAGS = [
   ['corProccesed', 'COR'],
@@ -474,6 +495,17 @@ async function resolveInsuranceCarrierIds(maps, insuranceRows) {
 }
 
 /**
+ * Tras reescribir un lead ya materializado: mueve `updated` a ahora.
+ * Si se deja el `updated` de Glide, el INC de tblLeads_mat no recopia la fila
+ * (watermark = MAX(mat.updated)) y attorney/legal quedan viejos en el datamart.
+ */
+function stampLeadUpdatedNow(item, at = new Date()) {
+  item.audit.updatedAt = at;
+  item.lead[item.lead.length - 1] = at;
+  return item;
+}
+
+/**
  * El PK local lo asigna AUTO_INCREMENT, no el idLead de origen: glide_id es la
  * única identidad de Glide. Las filas hijas se arman en transformLead con el
  * idLead de origen en la posición 0, así que hay que reapuntarlas al id local.
@@ -493,9 +525,9 @@ function relinkLeadId(item, leadId) {
 }
 
 /**
- * preserveLeadIds: Map de glide_id → id_lead ya existente. Lo pasan los
- * remigrate, que borran y reinsertan el lead: sin él, AUTO_INCREMENT le da un
- * PK nuevo y cualquier referencia externa al lead queda apuntando al vacío.
+ * preserveLeadIds: Map de glide_id → id_lead ya existente. Esos se UPDATE,
+ * no se borran: el PK local se queda y las FKs (datamart, notas, espejos)
+ * siguen apuntando al mismo lead. Los hijos 1:1 y el client también.
  */
 async function flushLeadBatch(targetConn, items, maps, { preserveLeadIds = null } = {}) {
   if (!items.length) return;
@@ -503,63 +535,60 @@ async function flushLeadBatch(targetConn, items, maps, { preserveLeadIds = null 
   const keptLeadId = (item) =>
     preserveLeadIds ? preserveLeadIds.get(Number(item.leadId)) : undefined;
 
-  const baseClientId = await bulkInsert(targetConn, db, 'client', [
-    'first_name', 'last_name', 'display_name', 'date_of_birth', 'is_minor', 'preferred_language',
-    'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id', 'id_linked_user',
-  ], items.map((i) => i.client));
-
-  const channelRows = [];
-  const addressRows = [];
-  items.forEach((item, idx) => {
-    const clientId = baseClientId + idx;
-    item._clientId = clientId;
-    const { createdAt, updatedAt, createdByUserId, updatedByUserId } = item.audit;
-    for (const c of item.channels) {
-      channelRows.push([clientId, ...c, createdAt, updatedAt, createdByUserId, updatedByUserId]);
+  const existing = [];
+  const fresh = [];
+  for (const item of items) {
+    const kept = keptLeadId(item);
+    if (kept) {
+      item._leadId = kept;
+      existing.push(item);
+    } else {
+      fresh.push(item);
     }
-    for (const a of item.addresses) {
-      addressRows.push([clientId, ...a, createdAt, updatedAt, createdByUserId, updatedByUserId]);
-    }
-  });
-
-  await bulkInsertIgnore(targetConn, db, 'client_channel', [
-    'id_client', 'id_channel_type', 'channel_value', 'channel_label', 'is_primary',
-    'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-  ], channelRows);
-  if (addressRows.length) {
-    await bulkInsert(targetConn, db, 'client_address', [
-      'id_client', 'id_address_kind', 'street', 'unit', 'city', 'id_state', 'postal_code', 'address_label', 'is_primary',
-      'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-    ], addressRows);
   }
 
-  const baseLeadId = await bulkInsert(targetConn, db, 'lead', [
-    // Explícito cuando rehacemos un lead que ya existía, NULL para que
-    // AUTO_INCREMENT lo asigne cuando es nuevo.
-    'id_lead',
-    'glide_id', 'id_lead_status', 'id_stage', 'id_company_office', 'submitter_user_id',
-    'referral_source', 'source_type', 'internal_source', 'case_type', 'accident_or_wc',
-    'is_vip', 'is_hot_lead', 'hot_lead_start_at', 'boost_yn', 'confirmed', 'cnv_value',
-    'callback_id', 'callback_id_new', 'is_callback', 'is_callback_new',
-    'lead_sort_order', 'new_leads', 'id_media', 'link_to_lead_record', 'intake_view_stepper',
-    'id_acc', 'id_lead_old', 'employer', 'requested_drop',
-    'legacy_lead_id', 'legacy_case_id', 'created_by_user_id', 'created_at',
-    // origin explícito por claridad, aunque el trigger lead_origin_bi lo
-    // vuelve a derivar de glide_id: la base es la autoridad, para que un
-    // proceso desactualizado no marque leads de Glide como del portal.
-    'updated_by_user_id', 'updated_at', 'origin',
-  ], items.map((i) => [keptLeadId(i) ?? null, ...i.lead, 'GLIDE']));
+  if (existing.length) {
+    await bulkUpdateByPk(
+      targetConn,
+      db,
+      'lead',
+      'id_lead',
+      LEAD_WRITE_COLUMNS,
+      existing.map((i) => [i._leadId, ...i.lead, 'GLIDE'])
+    );
+  }
 
-  // insertId es el primer id que AUTO_INCREMENT generó en esta sentencia. Las
-  // filas con id explícito no consumen el contador, así que solo avanza para
-  // las que fueron con NULL.
-  let nextAutoLeadId = baseLeadId;
+  if (fresh.length) {
+    const baseLeadId = await bulkInsert(targetConn, db, 'lead', [
+      'id_lead',
+      ...LEAD_WRITE_COLUMNS,
+    ], fresh.map((i) => [null, ...i.lead, 'GLIDE']));
+    let nextAutoLeadId = baseLeadId;
+    for (const item of fresh) {
+      item._leadId = nextAutoLeadId++;
+    }
+  }
+
   items.forEach((item) => {
-    item._leadId = keptLeadId(item) ?? nextAutoLeadId++;
     relinkLeadId(item, item._leadId);
   });
 
-  await bulkInsert(targetConn, db, 'lead_org_snapshot', [
+  const graph = await loadExistingLeadGraph(
+    targetConn,
+    db,
+    existing.map((i) => i._leadId)
+  );
+  await upsertPrimaryPeople(targetConn, db, items, graph);
+  await upsertClientContacts(targetConn, db, items.map((i) => ({
+    clientId: i._clientId,
+    channels: i.channels,
+    addresses: i.addresses,
+    audit: i.audit,
+  })), graph);
+
+  const skipCreated = { skipUpdate: ['id_lead', 'created_at', 'created_by_user_id'] };
+
+  await bulkUpsert(targetConn, db, 'lead_org_snapshot', [
     'id_lead',
     'directorate', 'directorate_name', 'directorate_user_id',
     'region', 'region_name', 'region_user_id',
@@ -568,38 +597,38 @@ async function flushLeadBatch(targetConn, items, maps, { preserveLeadIds = null 
     'team', 'team_name', 'team_user_id',
     'duo', 'duo_name', 'duo_user_id',
     'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-  ], items.map((i) => withFullAudit(i.orgSnapshot, i.audit)));
+  ], items.map((i) => withFullAudit(i.orgSnapshot, i.audit)), skipCreated);
 
   await resolveAccidentCatalogIds(maps, items);
 
-  await bulkInsert(targetConn, db, 'lead_accident', [
+  await bulkUpsert(targetConn, db, 'lead_accident', [
     'id_lead', 'date_of_accident', 'id_accident_state', 'id_rep_state', 'id_location_type',
     'id_at_fault_type', 'id_at_fault_sub_type', 'vehicle_description', 'id_property_severity', 'id_personal_severity',
     'police_report', 'driving_rideshare', 'passenger_in_rideshare', 'passenger_count',
     'commercial_policy', 'construction', 'truck',
     'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-  ], items.map((i) => withFullAudit(i.accident, i.audit)));
+  ], items.map((i) => withFullAudit(i.accident, i.audit)), skipCreated);
 
-  await bulkInsert(targetConn, db, 'lead_legal', [
+  await bulkUpsert(targetConn, db, 'lead_legal', [
     'id_lead', 'id_attorney', 'id_legal_status', 'ticket_attorney',
     'has_prev_attorney', 'prev_attorney_name', 'id_prev_attorney', 'is_new_attorney',
     'date_legal_accepted', 'date_legal_rejected', 'signing_at', 'date_signed', 'is_docusign',
     'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-  ], items.map((i) => withFullAudit(i.legal, i.audit)));
+  ], items.map((i) => withFullAudit(i.legal, i.audit)), skipCreated);
 
-  await bulkInsert(targetConn, db, 'lead_clinical', [
+  await bulkUpsert(targetConn, db, 'lead_clinical', [
     'id_lead', 'id_tx_location', 'id_clinical_status', 'is_telemedicine', 'requires_transportation',
     'appointment_at', 'visits', 'idot', 'ldot', 'date_clinical_accepted', 'date_clinical_rejected',
     'has_um',
     'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-  ], items.map((i) => withFullAudit(i.clinical, i.audit)));
+  ], items.map((i) => withFullAudit(i.clinical, i.audit)), skipCreated);
 
   const injuryItems = items.filter((i) => i.injury);
   if (injuryItems.length) {
-    await bulkInsert(targetConn, db, 'lead_injury', [
+    await bulkUpsert(targetConn, db, 'lead_injury', [
       'id_lead', 'fracture', 'ambulance', 'hospital', 'hospital_name', 'xray', 'mri', 'ct_scans',
       'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-    ], injuryItems.map((i) => withFullAudit(i.injury, i.audit)));
+    ], injuryItems.map((i) => withFullAudit(i.injury, i.audit)), skipCreated);
   }
 
   await resolveInjurySiteIds(maps, items);
@@ -610,92 +639,26 @@ async function flushLeadBatch(targetConn, items, maps, { preserveLeadIds = null 
     ], injurySiteRows);
   }
 
-  await bulkInsert(targetConn, db, 'lead_timeline', [
+  await bulkUpsert(targetConn, db, 'lead_timeline', [
     'id_lead', 'date_created', 'date_came_in', 'date_locked_down', 'date_dropped', 'callback_at',
     'reason_pending', 'reason_drop', 'other_drop_reason', 'lka_date',
     'created_at', 'updated_at',
-  ], items.map((i) => withTimelineAudit(i.timeline, i.audit)));
+  ], items.map((i) => withTimelineAudit(i.timeline, i.audit)), {
+    skipUpdate: ['id_lead', 'created_at'],
+  });
 
-  await bulkInsert(targetConn, db, 'lead_party', [
-    'id_lead', 'id_client', 'id_party_kind', 'party_sequence', 'is_primary_party',
-    'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-  ], items.map((i) => withFullAudit([i._leadId, i._clientId, PARTY_INJURED, null, 1], i.audit)));
+  const partyIdByLeadSeq = await upsertPassengers(
+    targetConn, db, items, graph, resolvePassengerCatalogIds, maps
+  );
 
-  const psnClients = [];
-  const psnMeta = [];
-  for (const item of items) {
-    for (const psn of item.passengers) {
-      psnMeta.push({ ...psn, audit: item.audit });
-      psnClients.push(psn.client);
-    }
-  }
-  if (psnClients.length) {
-    await resolvePassengerCatalogIds(maps, psnMeta);
-    const psnBaseId = await bulkInsert(targetConn, db, 'client', [
-      'first_name', 'last_name', 'date_of_birth', 'is_minor',
-      'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id', 'id_linked_user',
-    ], psnClients);
-    const psnChannels = [];
-    const psnParties = [];
-    psnMeta.forEach((meta, idx) => {
-      const clientId = psnBaseId + idx;
-      const a = meta.audit;
-      for (const c of meta.channels) {
-        psnChannels.push([clientId, ...c, a.createdAt, a.updatedAt, a.createdByUserId, a.updatedByUserId]);
-      }
-      psnParties.push(withFullAudit([meta.party[0], clientId, ...meta.party.slice(2)], meta.audit));
-    });
-    await bulkInsertIgnore(targetConn, db, 'client_channel', [
-      'id_client', 'id_channel_type', 'channel_value', 'channel_label', 'is_primary',
-      'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-    ], psnChannels);
-    const psnPartyBaseId = await bulkInsert(targetConn, db, 'lead_party', [
-      'id_lead', 'id_client', 'id_party_kind', 'party_sequence', 'id_tx_location', 'appointment_at', 'id_personal_severity', 'is_primary_party',
-      'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-    ], psnParties);
-
-    const partyIdByLeadSeq = new Map();
-    psnMeta.forEach((meta, idx) => {
-      partyIdByLeadSeq.set(`${meta.party[0]}:${meta.slotSeq}`, psnPartyBaseId + idx);
-    });
-
-    const partyInjurySiteRows = [];
-    psnMeta.forEach((meta, idx) => {
-      const partyId = psnPartyBaseId + idx;
-      const a = meta.audit;
-      for (const siteId of meta.injurySites || []) {
-        partyInjurySiteRows.push([partyId, siteId, a.createdAt, a.updatedAt, a.createdByUserId, a.updatedByUserId]);
-      }
-    });
-    if (partyInjurySiteRows.length) {
-      await bulkInsertIgnore(targetConn, db, 'lead_party_injury_site', [
-        'id_lead_party', 'id_injury_site', 'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-      ], partyInjurySiteRows);
-    }
-
-    for (const item of items) {
-      for (const row of item.insurance) {
-        if (row[2] !== 'PASSENGER') continue;
-        const partyId = partyIdByLeadSeq.get(`${row[0]}:${row[3]}`);
-        if (partyId) row[1] = partyId;
-      }
-    }
-  }
-
-  const staffRows = items.flatMap((i) => i.staff.map((r) => [...withFullAudit(r, i.audit), 1]));
-  if (staffRows.length) {
-    await bulkInsert(targetConn, db, 'lead_staff', [
-      'id_lead', 'id_staff_kind', 'id_user', 'staff_key', 'staff_display_name', 'assigned_at',
-      'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id', 'is_active',
-    ], staffRows);
-  }
+  await upsertStaff(targetConn, db, items, graph);
 
   const syncRows = items.flatMap((i) => i.syncFlags.map((row) => withFullAudit(row, i.audit)));
   if (syncRows.length) {
     const colList = 'id_lead, flag_code, flag_value, created_at, updated_at, created_by_user_id, updated_by_user_id';
-    const ph = syncRows.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ');
+    const flagPh = syncRows.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ');
     await targetConn.query(
-      `INSERT INTO \`${db}\`.lead_sync_flag (${colList}) VALUES ${ph}
+      `INSERT INTO \`${db}\`.lead_sync_flag (${colList}) VALUES ${flagPh}
        ON DUPLICATE KEY UPDATE flag_value = VALUES(flag_value),
          updated_at = VALUES(updated_at),
          updated_by_user_id = VALUES(updated_by_user_id)`,
@@ -703,28 +666,14 @@ async function flushLeadBatch(targetConn, items, maps, { preserveLeadIds = null 
     );
   }
 
-  const noteRows = items.flatMap((i) => i.notes);
-  if (noteRows.length) {
-    await bulkInsert(targetConn, db, 'lead_note', [
-      'id_lead', 'note_type', 'body', 'posted_at', 'posted_by', 'posted_by_user_id',
-    ], noteRows);
-  }
+  await upsertNotes(targetConn, db, items, graph);
 
-  const insuranceRows = items.flatMap((i) => i.insurance.map((row) => withFullAudit(row, i.audit)));
+  const insuranceRows = items.flatMap((i) => i.insurance);
   if (insuranceRows.length) {
     await resolveInsuranceCarrierIds(maps, insuranceRows);
-    await bulkInsert(targetConn, db, 'lead_insurance', [
-      'id_lead', 'id_lead_party', 'insurance_role', 'party_sequence', 'carrier_raw', 'id_carrier',
-      'created_at', 'updated_at', 'created_by_user_id', 'updated_by_user_id',
-    ], insuranceRows);
   }
-
-  const rejectRows = items.flatMap((i) => i.rejects);
-  if (rejectRows.length) {
-    await bulkInsert(targetConn, db, 'import_reject', [
-      'id_lead', 'field_name', 'raw_value', 'reject_reason',
-    ], rejectRows);
-  }
+  await upsertInsurance(targetConn, db, items, graph, partyIdByLeadSeq);
+  await upsertRejects(targetConn, db, items, graph);
 }
 
 async function migrateOneLead(targetConn, l, maps) {
@@ -799,11 +748,10 @@ const LEAD_CHILD_TABLES = [
 ];
 
 /**
- * Borra un lead de Glide y sus hijos. El filtro por origin es el que protege a
- * los leads nacidos en el portal: una vez espejados en prod tienen glide_id y
- * sin él caerían acá, perdiendo todo lo que el modelo guarda y prod no.
+ * Solo prune de huérfanos (`deleteLeadRow: true`): el remigrate ya no borra
+ * hijos; los actualiza in-place.
  */
-async function deleteLeadGraphBySourceIds(conn, sourceIds) {
+async function deleteLeadGraphBySourceIds(conn, sourceIds, { deleteLeadRow = false } = {}) {
   if (!sourceIds.length) return 0;
   const db = config.target.database;
   const ph = sourceIds.map(() => '?').join(',');
@@ -830,11 +778,24 @@ async function deleteLeadGraphBySourceIds(conn, sourceIds) {
       sourceIds
     );
   }
+  if (!deleteLeadRow) return sourceIds.length;
   const [rLead] = await conn.query(
     `DELETE l FROM \`${db}\`.\`lead\` l WHERE ${match}`,
     sourceIds
   );
   return Number(rLead.affectedRows || 0);
+}
+
+async function existingLeadIdByGlideId(targetConn, ids) {
+  if (!ids.length) return new Map();
+  const db = config.target.database;
+  const ph = ids.map(() => '?').join(',');
+  const [rows] = await targetConn.query(
+    `SELECT glide_id, id_lead FROM \`${db}\`.\`lead\`
+     WHERE glide_id IN (${ph}) AND origin = 'GLIDE'`,
+    ids
+  );
+  return new Map(rows.map((r) => [Number(r.glide_id), Number(r.id_lead)]));
 }
 
 async function runMigration(sourceConn, targetConn, maps, {
@@ -903,8 +864,8 @@ async function runMigration(sourceConn, targetConn, maps, {
     }
 
     const pendingIds = pending.map((row) => Number(row.idLead));
-    const already = await existingSourceLeadIds(targetConn, pendingIds);
-    const refreshIds = pendingIds.filter((id) => already.has(id));
+    const preserveLeadIds = await existingLeadIdByGlideId(targetConn, pendingIds);
+    const refreshIds = pendingIds.filter((id) => preserveLeadIds.has(id));
     if (refreshIds.length) {
       console.log(`  · actualizar ${refreshIds.length} ya en lead (tras idLead ${cursor})`);
     }
@@ -913,10 +874,7 @@ async function runMigration(sourceConn, targetConn, maps, {
       const transformed = pending.map((row) => transformLead(row, maps));
       await targetConn.beginTransaction();
       try {
-        if (refreshIds.length) {
-          await deleteLeadGraphBySourceIds(targetConn, refreshIds);
-        }
-        await flushLeadBatch(targetConn, transformed, maps);
+        await flushLeadBatch(targetConn, transformed, maps, { preserveLeadIds });
         await targetConn.commit();
       } catch (err) {
         await targetConn.rollback();
@@ -946,6 +904,7 @@ module.exports = {
   runMigration,
   getResumeWatermark,
   transformLead,
+  stampLeadUpdatedNow,
   flushLeadBatch,
   deleteLeadGraphBySourceIds,
   portalOwnedSourceIds,

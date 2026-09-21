@@ -5,6 +5,16 @@ async function runApplyViews({ dryRun = false } = {}) {
   const files = [
     { file: '03_view_tblLeads_flat.sql', label: 'v_tblLeads + tblLeads' },
     { file: '06_views_etl_compat.sql', label: 'vistas ETL compat (g_users, refs, logs, …)' },
+    {
+      file: 'patches/lead_logs_status_view_from_log.sql',
+      label: 'tblLeadsLogsStatus (espejo Glide)',
+      optional: true,
+    },
+    {
+      file: 'patches/lead_legal_clinical_view_from_mirror.sql',
+      label: 'tblLeadsDataLegalClinicalStatus (espejo Glide)',
+      optional: true,
+    },
     { file: '05_view_user_rehire_stats.sql', label: 'v_user_rehire_stats', optional: true },
   ];
 

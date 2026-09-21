@@ -196,6 +196,7 @@ async function truncateDomain(conn, db) {
   await conn.query("SET FOREIGN_KEY_CHECKS = 1");
 }
 
+/** Borra hijos del lead (el row de `lead` se queda; el PK no se recicla). */
 async function deleteLeadGraph(conn, db, glideId) {
   await conn.query("SET FOREIGN_KEY_CHECKS = 0");
   const [[lead]] = await conn.query(
@@ -227,7 +228,6 @@ async function deleteLeadGraph(conn, db, glideId) {
     "lead_org_snapshot",
     "import_reject",
     "lead_party",
-    "lead",
   ];
   for (const table of child) {
     await conn.query(`DELETE FROM \`${db}\`.\`${table}\` WHERE id_lead = ?`, [id]);

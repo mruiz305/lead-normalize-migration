@@ -14,7 +14,6 @@ const {
   seedCatalogs,
   seedLeads,
   truncateDomain,
-  deleteLeadGraph,
   clientNameForLead,
   orgSnapshotForLead,
 } = require("./seed");
@@ -113,25 +112,54 @@ describe("resume", () => {
   });
 });
 
+async function remigrateOne(conn, glideId) {
+  const [[kept]] = await conn.query(
+    `SELECT l.id_lead, p.id_client
+     FROM \`${db}\`.\`lead\` l
+     INNER JOIN \`${db}\`.lead_party p ON p.id_lead = l.id_lead AND p.is_primary_party = 1
+     WHERE l.glide_id = ?`,
+    [glideId]
+  );
+  const preserveLeadIds = new Map([[glideId, Number(kept.id_lead)]]);
+  await seedAccidentLocationTypes(conn);
+  await seedSeverityLevels(conn);
+  const maps = await loadCatalogMaps(conn);
+  const [[row]] = await conn.query(
+    `SELECT * FROM \`${db}\`.tblLeads_src WHERE idLead = ?`,
+    [glideId]
+  );
+  await flushLeadBatch(conn, [transformLead(row, maps)], maps, { preserveLeadIds });
+  return { idLead: Number(kept.id_lead), idClient: Number(kept.id_client) };
+}
+
 describe("incremental remigrate", () => {
   it("updated reciente se reescribe; lead viejo queda igual", async () => {
     await migrateAll();
 
     await withTarget(async (conn) => {
+      const [[before]] = await conn.query(
+        `SELECT l.id_lead, p.id_client
+         FROM \`${db}\`.\`lead\` l
+         INNER JOIN \`${db}\`.lead_party p ON p.id_lead = l.id_lead AND p.is_primary_party = 1
+         WHERE l.glide_id = 1002`
+      );
       await conn.query(
         `UPDATE \`${db}\`.tblLeads_src
          SET firstName = 'Roberto', updated = '2026-09-01 08:00:00'
          WHERE idLead = 1002`
       );
-      await deleteLeadGraph(conn, db, 1002);
-      await seedAccidentLocationTypes(conn);
-      await seedSeverityLevels(conn);
-      const maps = await loadCatalogMaps(conn);
-      const [[row]] = await conn.query(
-        `SELECT * FROM \`${db}\`.tblLeads_src WHERE idLead = 1002`
-      );
-      await flushLeadBatch(conn, [transformLead(row, maps)], maps);
+      const idLead = await remigrateOne(conn, 1002);
+      assert.equal(idLead.idLead, Number(before.id_lead));
+      assert.equal(idLead.idClient, Number(before.id_client));
 
+      const [[after]] = await conn.query(
+        `SELECT l.id_lead, p.id_client
+         FROM \`${db}\`.\`lead\` l
+         INNER JOIN \`${db}\`.lead_party p ON p.id_lead = l.id_lead AND p.is_primary_party = 1
+         WHERE l.glide_id = 1002`
+      );
+      assert.equal(Number(after.id_lead), Number(before.id_lead));
+      assert.equal(Number(after.id_client), Number(before.id_client));
       assert.equal(await clientNameForLead(conn, db, 1002), "Roberto");
       assert.equal(await clientNameForLead(conn, db, 1010), "Oldie");
       const [[leads]] = await conn.query(`SELECT COUNT(*) AS n FROM \`${db}\`.\`lead\``);
@@ -145,6 +173,9 @@ describe("incremental remigrate", () => {
     await withTarget(async (conn) => {
       const beforeOther = await orgSnapshotForLead(conn, db, 1010);
       assert.equal(beforeOther.office_code, "MIA");
+      const [[before]] = await conn.query(
+        `SELECT id_lead FROM \`${db}\`.\`lead\` WHERE glide_id = 1002`
+      );
 
       await conn.query(
         `UPDATE \`${db}\`.tblLeads_src
@@ -155,14 +186,8 @@ describe("incremental remigrate", () => {
              updated = '2026-09-01 09:00:00'
          WHERE idLead = 1002`
       );
-      await deleteLeadGraph(conn, db, 1002);
-      await seedAccidentLocationTypes(conn);
-      await seedSeverityLevels(conn);
-      const maps = await loadCatalogMaps(conn);
-      const [[row]] = await conn.query(
-        `SELECT * FROM \`${db}\`.tblLeads_src WHERE idLead = 1002`
-      );
-      await flushLeadBatch(conn, [transformLead(row, maps)], maps);
+      const kept = await remigrateOne(conn, 1002);
+      assert.equal(kept.idLead, Number(before.id_lead));
 
       const snap = await orgSnapshotForLead(conn, db, 1002);
       assert.equal(snap.office_code, "TPA");
@@ -176,6 +201,46 @@ describe("incremental remigrate", () => {
       const other = await orgSnapshotForLead(conn, db, 1010);
       assert.equal(other.office_code, "MIA");
       assert.equal(Number(other.id_company_office), 81);
+    });
+  });
+
+  it("segunda corrida sin resume actualiza in-place y no duplica", async () => {
+    await migrateAll();
+    let idBefore;
+    let clientBefore;
+    let clientsBefore;
+    await withTarget(async (conn) => {
+      const [[row]] = await conn.query(
+        `SELECT l.id_lead, p.id_client
+         FROM \`${db}\`.\`lead\` l
+         INNER JOIN \`${db}\`.lead_party p ON p.id_lead = l.id_lead AND p.is_primary_party = 1
+         WHERE l.glide_id = 1001`
+      );
+      idBefore = Number(row.id_lead);
+      clientBefore = Number(row.id_client);
+      const [[clients]] = await conn.query(`SELECT COUNT(*) AS n FROM \`${db}\`.client`);
+      clientsBefore = Number(clients.n);
+      await conn.query(
+        `UPDATE \`${db}\`.tblLeads_src SET firstName = 'Anita' WHERE idLead = 1001`
+      );
+    });
+
+    await migrateAll();
+
+    await withTarget(async (conn) => {
+      const [[row]] = await conn.query(
+        `SELECT l.id_lead, p.id_client
+         FROM \`${db}\`.\`lead\` l
+         INNER JOIN \`${db}\`.lead_party p ON p.id_lead = l.id_lead AND p.is_primary_party = 1
+         WHERE l.glide_id = 1001`
+      );
+      assert.equal(Number(row.id_lead), idBefore);
+      assert.equal(Number(row.id_client), clientBefore);
+      assert.equal(await clientNameForLead(conn, db, 1001), "Anita");
+      const [[leads]] = await conn.query(`SELECT COUNT(*) AS n FROM \`${db}\`.\`lead\``);
+      const [[clients]] = await conn.query(`SELECT COUNT(*) AS n FROM \`${db}\`.client`);
+      assert.equal(Number(leads.n), 10);
+      assert.equal(Number(clients.n), clientsBefore);
     });
   });
 });

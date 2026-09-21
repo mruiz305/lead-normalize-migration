@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Re-migra leads cuyo `updated` es >= --since.
- * Borra esos ids en el modelo y los vuelve a cargar.
+ * Actualiza `lead` y sus hijos in-place (mismo id_lead / id_client).
  *
  * Origen:
  *   default      TNFG_INTAKE.tblLeads_src
@@ -22,6 +22,7 @@ const { loadCatalogMaps } = require('../src/migration/maps');
 const {
   LEAD_SELECT_COLUMNS,
   transformLead,
+  stampLeadUpdatedNow,
   flushLeadBatch,
 } = require('../src/migration/pipeline');
 const { syncInsuranceCatalog } = require('../src/migration/insurance');
@@ -136,9 +137,8 @@ async function collectIds(conn, db, since) {
 
 /**
  * Saca de TMP los idLead que en el modelo pertenecen a un lead del portal.
- * Es el único punto de corte que hace falta: sin esto el borrado se los
- * llevaría puestos, y si solo protegiéramos el borrado la reimportación
- * chocaría contra el UNIQUE de glide_id.
+ * Sin esto los hijos del portal se borrarían, y el UPDATE chocaría
+ * contra el UNIQUE de glide_id.
  */
 async function dropPortalOwned(conn, db) {
   const [r] = await conn.query(`
@@ -149,65 +149,7 @@ async function dropPortalOwned(conn, db) {
   return Number(r.affectedRows || 0);
 }
 
-async function deleteCollected(conn, db) {
-  // TMP.id_lead = idLead Glide/src → resolver lead local vía glide_id.
-  const childDirect = [
-    'lead_insurance',
-    'lead_note',
-    'lead_staff',
-    'lead_sync_flag',
-    'lead_status_event',
-    'lead_injury_site',
-    'lead_injury',
-    'lead_accident',
-    'lead_legal',
-    'lead_clinical',
-    'lead_timeline',
-    'lead_org_snapshot',
-    'import_reject',
-  ];
-
-  console.log('  lead_party_injury_site…');
-  const [r0] = await conn.query(`
-    DELETE lpis FROM \`${db}\`.lead_party_injury_site lpis
-    INNER JOIN \`${db}\`.lead_party lp ON lp.id_lead_party = lpis.id_lead_party
-    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
-    INNER JOIN ${TMP} t ON t.id_lead = l.glide_id
-  `);
-  console.log(`    ${r0.affectedRows}`);
-
-  console.log('  lead_party…');
-  const [rParty] = await conn.query(`
-    DELETE lp FROM \`${db}\`.lead_party lp
-    INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = lp.id_lead
-    INNER JOIN ${TMP} t ON t.id_lead = l.glide_id
-  `);
-  console.log(`    ${rParty.affectedRows}`);
-
-  for (const table of childDirect) {
-    process.stdout.write(`  ${table}…`);
-    const [r] = await conn.query(`
-      DELETE c FROM \`${db}\`.\`${table}\` c
-      INNER JOIN \`${db}\`.\`lead\` l ON l.id_lead = c.id_lead
-      INNER JOIN ${TMP} t ON t.id_lead = l.glide_id
-    `);
-    console.log(` ${r.affectedRows}`);
-  }
-
-  console.log('  lead…');
-  const [rLead] = await conn.query(`
-    DELETE l FROM \`${db}\`.\`lead\` l
-    INNER JOIN ${TMP} t ON t.id_lead = l.glide_id
-  `);
-  console.log(`    ${rLead.affectedRows}`);
-  return Number(rLead.affectedRows);
-}
-
-/**
- * glide_id → id_lead de los leads que están por rehacerse. Hay que leerlo
- * antes del borrado: después ya no existe de dónde sacarlo, y sin él la
- * reinserción le asigna un PK nuevo a un lead que no cambió de identidad.
- */
+/** glide_id → id_lead: el UPDATE usa este PK; no se recicla. */
 async function collectExistingLeadIds(targetConn, db) {
   const [rows] = await targetConn.query(
     `SELECT l.glide_id, l.id_lead FROM \`${db}\`.\`lead\` l
@@ -251,7 +193,7 @@ async function remigrateCollected(
     );
     if (!rows.length) break;
 
-    const transformed = rows.map((row) => transformLead(row, maps));
+    const transformed = rows.map((row) => stampLeadUpdatedNow(transformLead(row, maps)));
     await targetConn.beginTransaction();
     try {
       await flushLeadBatch(targetConn, transformed, maps, { preserveLeadIds });
@@ -293,7 +235,7 @@ async function main() {
   console.log(`  Destino: ${config.target.host}/${db}`);
   console.log(`  Origen:  ${originLabel}${opts.fromProd ? ' (producción)' : ' (staging local)'}`);
   console.log(`  Filtro:  updated >= ${opts.since}`);
-  console.log(`  Modo:    ${opts.dryRun ? 'dry-run' : opts.deleteOnly ? 'delete-only' : 'delete+reload'}\n`);
+  console.log(`  Modo:    ${opts.dryRun ? 'dry-run' : 'update lead + hijos'}\n`);
 
   await withTarget(async (targetConn) => {
     const needSource = opts.fromProd || (!opts.dryRun && !opts.deleteOnly);
@@ -317,28 +259,22 @@ async function main() {
       if (skippedPortal) {
         console.log(`  omitidos por ser del portal: ${skippedPortal}`);
       }
-      console.log(`  ya en modelo (se rehacen): ${inNorm.c}`);
+      console.log(`  ya en modelo (se actualizan): ${inNorm.c}`);
       console.log(`  resto del modelo (intactos): ${keep.c}\n`);
 
       if (opts.dryRun) {
-        console.log('(dry-run) no se borró ni migró nada');
+        console.log('(dry-run) no se actualizó nada');
+        return;
+      }
+
+      if (opts.deleteOnly) {
+        console.log('(--delete-only ignorado: ya no se borran hijos; se actualizan)');
         return;
       }
 
       const preserveLeadIds = await collectExistingLeadIds(targetConn, db);
 
-      if (!opts.skipDelete) {
-        console.log('Paso 1: borrar hijos + lead…');
-        const deleted = await deleteCollected(targetConn, db);
-        console.log(`  ✓ borrados ${deleted} leads\n`);
-      }
-
-      if (opts.deleteOnly) {
-        console.log('(--delete-only) listo');
-        return;
-      }
-
-      console.log('Paso 2: catálogos / maps…');
+      console.log('Paso 1: catálogos / maps…');
       console.log('  org snapshot ← tblLeads (no g_users / hierarchy_membership)');
       await syncInsuranceCatalog(sourceConn, targetConn, { truncate: false, afterId: 0 });
       await seedAccidentLocationTypes(targetConn);
@@ -347,9 +283,9 @@ async function main() {
       await syncInjurySiteCatalog(sourceConn, targetConn, { truncate: false });
       const maps = await loadCatalogMaps(targetConn);
 
-      console.log(`Paso 3: re-migrar desde ${opts.fromProd ? 'prod' : 'staging'}…`);
+      console.log(`Paso 2: actualizar desde ${opts.fromProd ? 'prod' : 'staging'}…`);
       if (preserveLeadIds.size) {
-        console.log(`  conservando el id_lead original de ${preserveLeadIds.size} leads`);
+        console.log(`  actualizando el id_lead original de ${preserveLeadIds.size} leads`);
       }
       const started = Date.now();
       const result = await remigrateCollected(

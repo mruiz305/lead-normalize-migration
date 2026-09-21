@@ -39,7 +39,7 @@ async function main() {
       LEFT JOIN \`${db}\`.lead_legal ll ON ll.id_lead = l.id_lead
       LEFT JOIN \`${db}\`.import_reject ir
         ON ir.id_lead = l.id_lead AND ir.field_name = 'attorney' AND ir.reject_reason = 'catalog_miss'
-      LEFT JOIN \`${db}\`.\`${DEST}\` src ON src.idLead = l.id_lead
+      LEFT JOIN \`${db}\`.\`${DEST}\` src ON src.idLead = COALESCE(l.glide_id, l.id_lead)
       WHERE (
           ir.id_reject IS NOT NULL
           OR (ll.id_attorney IS NULL AND src.attorney IS NOT NULL AND TRIM(src.attorney) <> '')
@@ -96,8 +96,12 @@ async function main() {
       }
 
       await conn.query(
-        `UPDATE \`${db}\`.lead_legal SET id_attorney = ? WHERE id_lead = ?`,
+        `UPDATE \`${db}\`.lead_legal SET id_attorney = ?, updated_at = NOW() WHERE id_lead = ?`,
         [resolved, row.id_lead]
+      );
+      await conn.query(
+        `UPDATE \`${db}\`.\`lead\` SET updated_at = NOW() WHERE id_lead = ?`,
+        [row.id_lead]
       );
       if (row.id_reject) {
         await conn.query(
