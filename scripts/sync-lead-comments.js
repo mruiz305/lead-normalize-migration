@@ -8,10 +8,10 @@ const { loadCatalogMaps } = require('../src/migration/maps');
 const { syncLeadComments } = require('../src/migration/leadCommentSync');
 
 async function main() {
-  const truncate = !process.argv.includes('--no-truncate');
-  const resume = process.argv.includes('--resume');
+  const truncate = process.argv.includes('--truncate');
+  const resume = process.argv.includes('--resume') || !truncate;
   const db = config.target.database;
-  const mode = resume ? 'resume' : truncate ? 'full' : 'append';
+  const mode = truncate ? 'full' : 'resume';
   console.log(`Comentarios de lead (${db}) [${mode}]…\n`);
 
   await withTarget(async (targetConn) => {

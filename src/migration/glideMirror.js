@@ -90,53 +90,6 @@ async function flush(targetConn, table, columns, batch) {
   return written;
 }
 
-async function flushReplaceByLead(targetConn, table, columns, batch) {
-  if (!batch.length) return 0;
-  const db = config.target.database;
-  const leadIdx = columns.indexOf("id_lead");
-  const ph = `(${columns.map(() => "?").join(", ")})`;
-  // Incluye la PK: Glide a veces recrea la fila (Id 52677 → 52676) del mismo lead.
-  const update = columns
-    .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
-    .join(", ");
-  let written = 0;
-  for (let i = 0; i < batch.length; i += WRITE_BATCH) {
-    const byLead = new Map();
-    for (const row of batch.slice(i, i + WRITE_BATCH)) {
-      byLead.set(Number(row[leadIdx]), row);
-    }
-    const unique = [...byLead.values()];
-    const leads = unique.map((r) => Number(r[leadIdx]));
-    await targetConn.query(
-      `DELETE FROM \`${db}\`.${table}
-       WHERE id_lead IN (${leads.map(() => "?").join(", ")})`,
-      leads
-    );
-    try {
-      await targetConn.query(
-        `INSERT INTO \`${db}\`.${table} (${columns.join(", ")})
-         VALUES ${unique.map(() => ph).join(", ")}
-         ON DUPLICATE KEY UPDATE ${update}`,
-        unique.flat()
-      );
-    } catch (err) {
-      if (err.code !== "ER_DUP_ENTRY") throw err;
-      for (const row of unique) {
-        await targetConn.query(
-          `DELETE FROM \`${db}\`.${table} WHERE id_lead = ? OR \`${columns[0]}\` = ?`,
-          [Number(row[leadIdx]), row[0]]
-        );
-        await targetConn.query(
-          `INSERT INTO \`${db}\`.${table} (${columns.join(", ")}) VALUES ${ph}`,
-          row
-        );
-      }
-    }
-    written += unique.length;
-  }
-  return written;
-}
-
 /** Glide a veces tiene 2 Ids para el mismo lead; UNIQUE(id_lead) no admite dos en el mismo INSERT. */
 function dedupeByLead(batch, spec) {
   const leadIdx = spec.columns.indexOf("id_lead");
@@ -174,9 +127,7 @@ async function mirrorGlideTable(sourceConn, targetConn, spec, { full = false, on
       batch.push(spec.mapRow(r, idLead));
     }
     const toWrite = spec.uniqueLead ? dedupeByLead(batch, spec) : batch;
-    written += spec.uniqueLead
-      ? await flushReplaceByLead(targetConn, spec.table, spec.columns, toWrite)
-      : await flush(targetConn, spec.table, spec.columns, toWrite);
+    written += await flush(targetConn, spec.table, spec.columns, toWrite);
     if (onProgress) onProgress({ read, written, sinLead });
   }
 

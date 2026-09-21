@@ -46,25 +46,58 @@ function buildUserChannelRows(gUserRow, typeByCode) {
   return rows;
 }
 
-async function bulkInsertUserChannels(targetConn, db, rows) {
-  if (!rows.length) return 0;
-  const head = `
-    INSERT IGNORE INTO \`${db}\`.user_channel
-      (id_user, id_channel_type, channel_value, is_primary, is_active)
-    VALUES
-  `;
-  const placeholder = '(?, ?, ?, ?, 1)';
-  let inserted = 0;
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const chunk = rows.slice(i, i + BATCH_SIZE);
-    const params = chunk.flat();
-    const [result] = await targetConn.query(
-      `${head} ${chunk.map(() => placeholder).join(', ')}`,
-      params
+async function upsertUserChannels(targetConn, db, rows) {
+  if (!rows.length) return { updated: 0, inserted: 0 };
+  const userIds = [...new Set(rows.map((r) => r[0]))];
+  const existing = new Map();
+  for (let i = 0; i < userIds.length; i += BATCH_SIZE) {
+    const chunk = userIds.slice(i, i + BATCH_SIZE);
+    const [found] = await targetConn.query(
+      `SELECT id_channel, id_user, id_channel_type FROM \`${db}\`.user_channel
+       WHERE id_user IN (${chunk.map(() => '?').join(',')})
+       ORDER BY is_primary DESC, id_channel`,
+      chunk
     );
-    inserted += result.affectedRows;
+    for (const r of found) {
+      const key = `${Number(r.id_user)}:${Number(r.id_channel_type)}`;
+      if (!existing.has(key)) existing.set(key, Number(r.id_channel));
+    }
   }
-  return inserted;
+
+  const toUpdate = [];
+  const toInsert = [];
+  for (const row of rows) {
+    const id = existing.get(`${row[0]}:${row[1]}`);
+    if (id) toUpdate.push([id, row[2], row[3]]);
+    else toInsert.push([...row, 1]);
+  }
+
+  for (const [id, value, isPrimary] of toUpdate) {
+    await targetConn.query(
+      `UPDATE \`${db}\`.user_channel
+       SET channel_value = ?, is_primary = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
+       WHERE id_channel = ?`,
+      [value, isPrimary, id]
+    );
+  }
+
+  let inserted = 0;
+  if (toInsert.length) {
+    const head = `
+      INSERT IGNORE INTO \`${db}\`.user_channel
+        (id_user, id_channel_type, channel_value, is_primary, is_active)
+      VALUES
+    `;
+    for (let i = 0; i < toInsert.length; i += BATCH_SIZE) {
+      const chunk = toInsert.slice(i, i + BATCH_SIZE);
+      const [result] = await targetConn.query(
+        `${head} ${chunk.map(() => '(?, ?, ?, ?, ?)').join(', ')}`,
+        chunk.flat()
+      );
+      inserted += result.affectedRows;
+    }
+  }
+  return { updated: toUpdate.length, inserted };
 }
 
 async function syncUserChannelsFromGUsers(sourceConn, targetConn, { truncate = false } = {}) {
@@ -107,12 +140,18 @@ async function syncUserChannelsFromGUsers(sourceConn, targetConn, { truncate = f
     channelRows.push(...buildUserChannelRows({ ...row, id: idUser }, typeByCode));
   }
 
-  const inserted = await bulkInsertUserChannels(targetConn, tgtDb, channelRows);
+  const { updated, inserted } = await upsertUserChannels(targetConn, tgtDb, channelRows);
   const [[{ total }]] = await targetConn.query(
     `SELECT COUNT(*) AS total FROM \`${tgtDb}\`.user_channel`
   );
 
-  return { gUsers: gUsers.length, channelRows: channelRows.length, inserted, total };
+  return {
+    gUsers: gUsers.length,
+    channelRows: channelRows.length,
+    updated,
+    inserted,
+    total,
+  };
 }
 
 module.exports = {

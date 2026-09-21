@@ -69,65 +69,135 @@ async function loadCompanyOfficeMap(targetConn) {
   return byCode;
 }
 
-/**
- * Borra lo que esta corrida va a rehacer, y solo eso.
- *
- * Dos conjuntos, por razones distintas. Las filas origin='GLIDE' porque son
- * derivadas y pueden haber quedado de un usuario que ya salió de g_users; si
- * no se borran acá, quedan colgadas para siempre. Y todas las filas de los
- * usuarios que sí vamos a derivar, sin mirar el origen, porque mientras una
- * persona exista en g_users Glide manda sobre ella: una edición allá tiene que
- * ganarle a lo que haya escrito el portal, y dejar las dos versiones le daría
- * al usuario dos jefes en el mismo nivel.
- *
- * Lo que sobrevive es la jerarquía PORTAL de usuarios que g_users aún no
- * trae con hierarchy* (alta nueva: el espejo SQL llega antes que los emails
- * del jefe). Si se los mete al rebuild solo por oficina de app_user, el sync
- * borra TEAM/POD y deja OFFICE vacío — y en el portal parece que “no trajo
- * la jerarquía”.
- */
-async function clearDerived(targetConn, tgtDb, userIds) {
-  await targetConn.query(
-    `DELETE FROM \`${tgtDb}\`.hierarchy_membership WHERE origin = 'GLIDE'`
-  );
-
-  const ids = [...userIds];
-  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
-    const chunk = ids.slice(i, i + BATCH_SIZE);
-    await targetConn.query(
-      `DELETE FROM \`${tgtDb}\`.hierarchy_membership
-       WHERE user_id IN (${chunk.map(() => '?').join(', ')})`,
-      chunk
-    );
-  }
-
-  const [[{ c }]] = await targetConn.query(
-    `SELECT COUNT(*) AS c FROM \`${tgtDb}\`.hierarchy_membership`
-  );
-  return Number(c);
+function membershipKey(userId, level, office, leader, isLeader) {
+  return `${userId}:${level}:${office ?? ''}:${leader ?? ''}:${isLeader ? 1 : 0}`;
 }
 
-async function flushMemberships(targetConn, tgtDb, batch) {
-  if (!batch.length) return 0;
-  // Sin IGNORE: clearDerived ya borró todas las filas de estos usuarios, así
-  // que un duplicado acá sería un error de verdad y queremos verlo.
-  const head = `
-    INSERT INTO \`${tgtDb}\`.hierarchy_membership
-      (user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader, is_primary, is_active, origin)
-    VALUES
-  `;
-  const placeholder = "(?, ?, ?, ?, ?, ?, ?, 'GLIDE')";
-  let inserted = 0;
-  for (let i = 0; i < batch.length; i += BATCH_SIZE) {
-    const chunk = batch.slice(i, i + BATCH_SIZE);
-    const params = chunk.flat();
-    const [result] = await targetConn.query(
-      `${head} ${chunk.map(() => placeholder).join(', ')}`,
-      params
+async function loadGlideMemberships(targetConn, tgtDb, userIds) {
+  const byKey = new Map();
+  if (!userIds.length) return byKey;
+  for (let i = 0; i < userIds.length; i += BATCH_SIZE) {
+    const chunk = userIds.slice(i, i + BATCH_SIZE);
+    const [rows] = await targetConn.query(
+      `SELECT membership_id, user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader
+       FROM \`${tgtDb}\`.hierarchy_membership
+       WHERE origin = 'GLIDE' AND user_id IN (${chunk.map(() => '?').join(',')})`,
+      chunk
     );
-    inserted += result.affectedRows;
+    for (const r of rows) {
+      byKey.set(
+        membershipKey(
+          Number(r.user_id),
+          Number(r.id_hierarchy_level),
+          r.id_company_office,
+          r.leader_user_id,
+          Number(r.is_leader)
+        ),
+        r
+      );
+    }
   }
-  return inserted;
+  return byKey;
+}
+
+async function upsertMemberships(targetConn, tgtDb, pending) {
+  if (!pending.length) return { inserted: 0, updated: 0, staleDeactivated: 0, portalClashes: 0 };
+
+  const rebuiltIds = [...new Set(pending.map((p) => p[0]))];
+  const existing = await loadGlideMemberships(targetConn, tgtDb, rebuiltIds);
+  const keepIds = new Set();
+  const toUpdate = [];
+  const toInsert = [];
+  const levelsByUser = new Map();
+
+  for (const row of pending) {
+    const [userId, level, office, leader, isLeader, isPrimary, isActive] = row;
+    const key = membershipKey(userId, level, office, leader, isLeader);
+    const ex = existing.get(key);
+    if (!levelsByUser.has(userId)) levelsByUser.set(userId, new Set());
+    levelsByUser.get(userId).add(level);
+    if (ex) {
+      keepIds.add(Number(ex.membership_id));
+      toUpdate.push([Number(ex.membership_id), isPrimary, isActive]);
+    } else {
+      toInsert.push(row);
+    }
+  }
+
+  for (const [id, isPrimary, isActive] of toUpdate) {
+    await targetConn.query(
+      `UPDATE \`${tgtDb}\`.hierarchy_membership
+       SET is_primary = ?, is_active = ?, origin = 'GLIDE',
+           end_date = IF(? = 1, NULL, COALESCE(end_date, CURDATE()))
+       WHERE membership_id = ?`,
+      [isPrimary, isActive, isActive, id]
+    );
+  }
+
+  let inserted = 0;
+  if (toInsert.length) {
+    const head = `
+      INSERT INTO \`${tgtDb}\`.hierarchy_membership
+        (user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader, is_primary, is_active, origin)
+      VALUES
+    `;
+    for (let i = 0; i < toInsert.length; i += BATCH_SIZE) {
+      const chunk = toInsert.slice(i, i + BATCH_SIZE);
+      const [result] = await targetConn.query(
+        `${head} ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, 'GLIDE')").join(', ')}`,
+        chunk.flat()
+      );
+      inserted += result.affectedRows;
+    }
+  }
+
+  const staleIds = [...existing.values()]
+    .map((r) => Number(r.membership_id))
+    .filter((id) => !keepIds.has(id));
+  const staleDeactivated = await deactivateMemberships(targetConn, tgtDb, staleIds);
+
+  // Mismo nivel: Glide manda, el PORTAL se apaga (no se borra).
+  const portalIds = [];
+  for (const [userId, levels] of levelsByUser) {
+    const levelList = [...levels];
+    const [rows] = await targetConn.query(
+      `SELECT membership_id FROM \`${tgtDb}\`.hierarchy_membership
+       WHERE origin = 'PORTAL' AND is_active = 1 AND user_id = ?
+         AND id_hierarchy_level IN (${levelList.map(() => '?').join(',')})`,
+      [userId, ...levelList]
+    );
+    for (const r of rows) portalIds.push(Number(r.membership_id));
+  }
+  const portalClashes = await deactivateMemberships(targetConn, tgtDb, portalIds);
+
+  return { inserted, updated: toUpdate.length, staleDeactivated, portalClashes };
+}
+
+async function deactivateMemberships(targetConn, tgtDb, ids) {
+  if (!ids.length) return 0;
+  let n = 0;
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_SIZE);
+    const [r] = await targetConn.query(
+      `UPDATE \`${tgtDb}\`.hierarchy_membership
+       SET is_active = 0, end_date = COALESCE(end_date, CURDATE())
+       WHERE membership_id IN (${chunk.map(() => '?').join(',')}) AND is_active = 1`,
+      chunk
+    );
+    n += Number(r.affectedRows || 0);
+  }
+  return n;
+}
+
+async function pruneGlideUsersGone(targetConn, tgtDb, knownAppIds) {
+  const [rows] = await targetConn.query(
+    `SELECT membership_id, user_id FROM \`${tgtDb}\`.hierarchy_membership
+     WHERE origin = 'GLIDE' AND is_active = 1`
+  );
+  const gone = rows
+    .filter((r) => !knownAppIds.has(Number(r.user_id)))
+    .map((r) => Number(r.membership_id));
+  return deactivateMemberships(targetConn, tgtDb, gone);
 }
 
 /**
@@ -175,6 +245,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
 
   const pending = [];
   const seen = new Set();
+  const knownAppIds = new Set();
 
   function queue(userId, level, idCompanyOffice, leaderUserId, isLeader, isPrimary = 0, isActive = 1) {
     if (!userId || !level) return;
@@ -199,6 +270,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     const appUser =
       (rowId ? userByRowId.get(rowId) : null) || userById.get(Number(gu.id)) || null;
     if (!appUser) continue;
+    knownAppIds.add(Number(appUser.id_user));
     // Sin emails de jefe en g_users todavía: no encolar (ni borrar PORTAL).
     if (!hasGlideHierarchy(gu)) continue;
 
@@ -276,31 +348,43 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     }
   }
 
-  let kept = 0;
   let inserted = 0;
-  if (truncate) {
-    // En una transacción: con TRUNCATE era imposible, y eso dejaba una ventana
-    // cada 3 minutos en la que la tabla estaba a medio rehacer y las consultas
-    // por jerarquía del API no encontraban nada.
-    await targetConn.beginTransaction();
-    try {
-      kept = await clearDerived(targetConn, tgtDb, new Set(pending.map((p) => p[0])));
-      inserted = await flushMemberships(targetConn, tgtDb, pending);
-      await targetConn.commit();
-    } catch (err) {
-      await targetConn.rollback();
-      throw err;
+  let updated = 0;
+  let staleDeactivated = 0;
+  let portalClashes = 0;
+  let goneDeactivated = 0;
+  await targetConn.beginTransaction();
+  try {
+    const stats = await upsertMemberships(targetConn, tgtDb, pending);
+    inserted = stats.inserted;
+    updated = stats.updated;
+    staleDeactivated = stats.staleDeactivated;
+    portalClashes = stats.portalClashes;
+    if (gUsers.length) {
+      goneDeactivated = await pruneGlideUsersGone(targetConn, tgtDb, knownAppIds);
     }
-    if (kept) {
-      console.log(`  ${kept} filas de usuarios que Glide no conoce, intactas`);
-    }
-  } else {
-    inserted = await flushMemberships(targetConn, tgtDb, pending);
+    await targetConn.commit();
+  } catch (err) {
+    await targetConn.rollback();
+    throw err;
   }
   console.log(
-    `  ✓ hierarchy_membership: ${inserted} filas (${memberCount} office members, ${leaderCount} leaders)`
+    `  ✓ hierarchy_membership: ${inserted} new, ${updated} upd` +
+      ` (${memberCount} office members, ${leaderCount} leaders)` +
+      (staleDeactivated ? `, ${staleDeactivated} glide viejas inactivas` : '') +
+      (portalClashes ? `, ${portalClashes} portal inactivas (mismo nivel)` : '') +
+      (goneDeactivated ? `, ${goneDeactivated} inactivas (usuario ya no está en g_users)` : '')
   );
-  return { inserted, members: memberCount, leaders: leaderCount, kept, skipped: false };
+  return {
+    inserted,
+    updated,
+    members: memberCount,
+    leaders: leaderCount,
+    staleDeactivated,
+    portalClashes,
+    goneDeactivated,
+    skipped: false,
+  };
 }
 
 module.exports = { populateHierarchyMembership };

@@ -109,9 +109,10 @@ async function main() {
         const tgt = config.target.database;
         if (await tableExists(targetConn, tgt, 'user_channel')) {
           console.log('  user_channel…');
-          const chStats = await syncUserChannelsFromGUsers(sourceConn, targetConn, { truncate: true });
+          const chStats = await syncUserChannelsFromGUsers(sourceConn, targetConn, { truncate: false });
           console.log(
-            `  ✓ user_channel: ${chStats.total} filas (${chStats.channelRows} desde g_users)`
+            `  ✓ user_channel: ${chStats.total} filas` +
+              ` (${chStats.updated || 0} upd, ${chStats.inserted || 0} new)`
           );
         } else {
           console.log('  ⚠ user_channel no existe — omitido');

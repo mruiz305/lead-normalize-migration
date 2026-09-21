@@ -75,7 +75,7 @@ async function main() {
         alreadySet += 1;
         if (!dryRun && row.id_reject) {
           await conn.query(
-            `DELETE FROM \`${db}\`.import_reject WHERE id_reject = ?`,
+            `UPDATE \`${db}\`.import_reject SET reject_reason = 'resolved' WHERE id_reject = ?`,
             [row.id_reject]
           );
         }
@@ -105,14 +105,14 @@ async function main() {
       );
       if (row.id_reject) {
         await conn.query(
-          `DELETE FROM \`${db}\`.import_reject WHERE id_reject = ?`,
+          `UPDATE \`${db}\`.import_reject SET reject_reason = 'resolved' WHERE id_reject = ?`,
           [row.id_reject]
         );
       } else {
-        // limpia reject viejo si quedó con otro reason
         await conn.query(
-          `DELETE FROM \`${db}\`.import_reject
-           WHERE id_lead = ? AND field_name = 'attorney'`,
+          `UPDATE \`${db}\`.import_reject
+           SET reject_reason = 'resolved'
+           WHERE id_lead = ? AND field_name = 'attorney' AND reject_reason <> 'resolved'`,
           [row.id_lead]
         );
       }
