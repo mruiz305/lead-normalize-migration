@@ -79,7 +79,8 @@ async function loadGlideMemberships(targetConn, tgtDb, userIds) {
   for (let i = 0; i < userIds.length; i += BATCH_SIZE) {
     const chunk = userIds.slice(i, i + BATCH_SIZE);
     const [rows] = await targetConn.query(
-      `SELECT membership_id, user_id, id_hierarchy_level, id_company_office, leader_user_id, is_leader
+      `SELECT membership_id, user_id, id_hierarchy_level, id_company_office, leader_user_id,
+              is_leader, is_primary, is_active
        FROM \`${tgtDb}\`.hierarchy_membership
        WHERE origin = 'GLIDE' AND user_id IN (${chunk.map(() => '?').join(',')})`,
       chunk
@@ -100,8 +101,33 @@ async function loadGlideMemberships(targetConn, tgtDb, userIds) {
   return byKey;
 }
 
+async function applyMembershipFlagUpdates(targetConn, tgtDb, toUpdate) {
+  if (!toUpdate.length) return 0;
+  for (let i = 0; i < toUpdate.length; i += BATCH_SIZE) {
+    const chunk = toUpdate.slice(i, i + BATCH_SIZE);
+    const ids = chunk.map(([id]) => id);
+    const whenPrimary = chunk.map(() => 'WHEN ? THEN ?').join(' ');
+    const whenActive = chunk.map(() => 'WHEN ? THEN ?').join(' ');
+    const params = [];
+    for (const [id, isPrimary] of chunk) params.push(id, isPrimary);
+    for (const [id, , isActive] of chunk) params.push(id, isActive);
+    for (const [id, , isActive] of chunk) params.push(id, isActive);
+    params.push(...ids);
+    await targetConn.query(
+      `UPDATE \`${tgtDb}\`.hierarchy_membership
+       SET is_primary = CASE membership_id ${whenPrimary} END,
+           is_active = CASE membership_id ${whenActive} END,
+           origin = 'GLIDE',
+           end_date = IF(CASE membership_id ${whenActive} END = 1, NULL, COALESCE(end_date, CURDATE()))
+       WHERE membership_id IN (${ids.map(() => '?').join(',')})`,
+      params
+    );
+  }
+  return toUpdate.length;
+}
+
 async function upsertMemberships(targetConn, tgtDb, pending) {
-  if (!pending.length) return { inserted: 0, updated: 0, staleDeactivated: 0, portalClashes: 0 };
+  if (!pending.length) return { inserted: 0, updated: 0, unchanged: 0, staleDeactivated: 0, portalClashes: 0 };
 
   const rebuiltIds = [...new Set(pending.map((p) => p[0]))];
   const existing = await loadGlideMemberships(targetConn, tgtDb, rebuiltIds);
@@ -109,6 +135,7 @@ async function upsertMemberships(targetConn, tgtDb, pending) {
   const toUpdate = [];
   const toInsert = [];
   const levelsByUser = new Map();
+  let unchanged = 0;
 
   for (const row of pending) {
     const [userId, level, office, leader, isLeader, isPrimary, isActive] = row;
@@ -118,21 +145,17 @@ async function upsertMemberships(targetConn, tgtDb, pending) {
     levelsByUser.get(userId).add(level);
     if (ex) {
       keepIds.add(Number(ex.membership_id));
-      toUpdate.push([Number(ex.membership_id), isPrimary, isActive]);
+      if (Number(ex.is_primary) === Number(isPrimary) && Number(ex.is_active) === Number(isActive)) {
+        unchanged += 1;
+      } else {
+        toUpdate.push([Number(ex.membership_id), isPrimary, isActive]);
+      }
     } else {
       toInsert.push(row);
     }
   }
 
-  for (const [id, isPrimary, isActive] of toUpdate) {
-    await targetConn.query(
-      `UPDATE \`${tgtDb}\`.hierarchy_membership
-       SET is_primary = ?, is_active = ?, origin = 'GLIDE',
-           end_date = IF(? = 1, NULL, COALESCE(end_date, CURDATE()))
-       WHERE membership_id = ?`,
-      [isPrimary, isActive, isActive, id]
-    );
-  }
+  await applyMembershipFlagUpdates(targetConn, tgtDb, toUpdate);
 
   let inserted = 0;
   if (toInsert.length) {
@@ -157,20 +180,21 @@ async function upsertMemberships(targetConn, tgtDb, pending) {
   const staleDeactivated = await deactivateMemberships(targetConn, tgtDb, staleIds);
 
   // Mismo nivel: Glide manda, el PORTAL se apaga (no se borra).
+  const [portalRows] = await targetConn.query(
+    `SELECT membership_id, user_id, id_hierarchy_level
+     FROM \`${tgtDb}\`.hierarchy_membership
+     WHERE origin = 'PORTAL' AND is_active = 1`
+  );
   const portalIds = [];
-  for (const [userId, levels] of levelsByUser) {
-    const levelList = [...levels];
-    const [rows] = await targetConn.query(
-      `SELECT membership_id FROM \`${tgtDb}\`.hierarchy_membership
-       WHERE origin = 'PORTAL' AND is_active = 1 AND user_id = ?
-         AND id_hierarchy_level IN (${levelList.map(() => '?').join(',')})`,
-      [userId, ...levelList]
-    );
-    for (const r of rows) portalIds.push(Number(r.membership_id));
+  for (const r of portalRows) {
+    const levels = levelsByUser.get(Number(r.user_id));
+    if (levels && levels.has(Number(r.id_hierarchy_level))) {
+      portalIds.push(Number(r.membership_id));
+    }
   }
   const portalClashes = await deactivateMemberships(targetConn, tgtDb, portalIds);
 
-  return { inserted, updated: toUpdate.length, staleDeactivated, portalClashes };
+  return { inserted, updated: toUpdate.length, unchanged, staleDeactivated, portalClashes };
 }
 
 async function deactivateMemberships(targetConn, tgtDb, ids) {
@@ -350,6 +374,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
 
   let inserted = 0;
   let updated = 0;
+  let unchanged = 0;
   let staleDeactivated = 0;
   let portalClashes = 0;
   let goneDeactivated = 0;
@@ -358,6 +383,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     const stats = await upsertMemberships(targetConn, tgtDb, pending);
     inserted = stats.inserted;
     updated = stats.updated;
+    unchanged = stats.unchanged;
     staleDeactivated = stats.staleDeactivated;
     portalClashes = stats.portalClashes;
     if (gUsers.length) {
@@ -369,7 +395,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
     throw err;
   }
   console.log(
-    `  ✓ hierarchy_membership: ${inserted} new, ${updated} upd` +
+    `  ✓ hierarchy_membership: ${inserted} new, ${updated} upd, ${unchanged} igual` +
       ` (${memberCount} office members, ${leaderCount} leaders)` +
       (staleDeactivated ? `, ${staleDeactivated} glide viejas inactivas` : '') +
       (portalClashes ? `, ${portalClashes} portal inactivas (mismo nivel)` : '') +
@@ -378,6 +404,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
   return {
     inserted,
     updated,
+    unchanged,
     members: memberCount,
     leaders: leaderCount,
     staleDeactivated,

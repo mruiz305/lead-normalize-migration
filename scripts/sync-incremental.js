@@ -166,7 +166,7 @@ async function main() {
     console.log(`  1. sync:tblLeads-src -- --since "${since}"`);
     if (!opts.skipPrune) console.log('  2. prune:leads-orphans  (IDs que ya no están en prod.tblLeads)');
     if (!opts.skipRemigrate) console.log(`  3. remigrate:updated -- --since "${since}"`);
-    console.log('  4. migrate:resume');
+    console.log('  4. migrate:resume --skip-hierarchy');
     console.log('  5. actualizar .sync-state.json');
     return;
   }
@@ -184,7 +184,7 @@ async function main() {
     console.log('\n(skip remigrate updated)');
   }
 
-  runNpm('migrate:resume');
+  runNpm('migrate:resume', ['--skip-hierarchy']);
 
   const next = writeState(state, since, startedAt);
   console.log(`\n✓ incremental listo · next lastSyncAt=${next.lastSyncAt}`);

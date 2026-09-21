@@ -112,7 +112,8 @@ async function main() {
           const chStats = await syncUserChannelsFromGUsers(sourceConn, targetConn, { truncate: false });
           console.log(
             `  ✓ user_channel: ${chStats.total} filas` +
-              ` (${chStats.updated || 0} upd, ${chStats.inserted || 0} new)`
+              ` (${chStats.updated || 0} upd, ${chStats.inserted || 0} new` +
+              `, ${chStats.unchanged || 0} igual)`
           );
         } else {
           console.log('  ⚠ user_channel no existe — omitido');

@@ -34,6 +34,7 @@ function parseMigrateOptions(args) {
   return {
     limit: parseLimit(args),
     resume: args.includes('--resume') || process.env.MIG_RESUME === '1',
+    skipHierarchy: args.includes('--skip-hierarchy'),
     fromId: (() => {
       const v = parseFlag(args, '--from-id');
       return v != null ? Number(v) : null;
@@ -103,7 +104,13 @@ async function assertTargetReady({ resume = false } = {}) {
   });
 }
 
-async function runMigrate({ dryRun = false, limit = null, resume = false, fromId = null } = {}) {
+async function runMigrate({
+  dryRun = false,
+  limit = null,
+  resume = false,
+  fromId = null,
+  skipHierarchy = false,
+} = {}) {
   const effectiveLimit = limit ?? (Number(process.env.MIG_LIMIT || 0) || null);
   const incremental = resume || fromId != null;
 
@@ -157,8 +164,12 @@ async function runMigrate({ dryRun = false, limit = null, resume = false, fromId
       ? (fromId != null ? Number(fromId) : await getResumeWatermark(targetConn))
       : 0;
 
-    console.log('Paso 1: hierarchy_membership (g_users + catálogo oficinas)…');
-    await populateHierarchyMembership(sourceConn, targetConn, { truncate: true });
+    if (skipHierarchy) {
+      console.log('Paso 1: hierarchy_membership omitido (ya lo hizo sync:users)');
+    } else {
+      console.log('Paso 1: hierarchy_membership (g_users + catálogo oficinas)…');
+      await populateHierarchyMembership(sourceConn, targetConn, { truncate: true });
+    }
 
     console.log('Paso 2: ref_insurance_carrier (refInsurance prod → PIP + AT_FAULT)…');
     if (incremental && resumeAfterId > 0) {
