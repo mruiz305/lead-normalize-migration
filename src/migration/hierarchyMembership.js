@@ -69,36 +69,47 @@ async function loadCompanyOfficeMap(targetConn) {
   return byCode;
 }
 
-function membershipKey(userId, level, office, leader, isLeader) {
-  return `${userId}:${level}:${office ?? ''}:${leader ?? ''}:${isLeader ? 1 : 0}`;
+function keyPart(v) {
+  if (v == null || v === '') return '';
+  const n = Number(v);
+  return Number.isFinite(n) ? String(n) : String(v);
 }
 
-async function loadGlideMemberships(targetConn, tgtDb, userIds) {
+function membershipKey(userId, level, office, leader, isLeader) {
+  return `${keyPart(userId)}:${keyPart(level)}:${keyPart(office)}:${keyPart(leader)}:${isLeader ? 1 : 0}`;
+}
+
+/**
+ * Carga todas las filas de esos usuarios, no solo origin=GLIDE.
+ * uk_hierarchy_membership no incluye origin: una fila PORTAL con la misma
+ * tupla (user, level, office, leader, is_leader) hace fallar el INSERT.
+ */
+async function loadMemberships(targetConn, tgtDb, userIds) {
   const byKey = new Map();
-  if (!userIds.length) return byKey;
+  const glideByKey = new Map();
+  if (!userIds.length) return { byKey, glideByKey };
   for (let i = 0; i < userIds.length; i += BATCH_SIZE) {
     const chunk = userIds.slice(i, i + BATCH_SIZE);
     const [rows] = await targetConn.query(
       `SELECT membership_id, user_id, id_hierarchy_level, id_company_office, leader_user_id,
-              is_leader, is_primary, is_active
+              is_leader, is_primary, is_active, origin
        FROM \`${tgtDb}\`.hierarchy_membership
-       WHERE origin = 'GLIDE' AND user_id IN (${chunk.map(() => '?').join(',')})`,
+       WHERE user_id IN (${chunk.map(() => '?').join(',')})`,
       chunk
     );
     for (const r of rows) {
-      byKey.set(
-        membershipKey(
-          Number(r.user_id),
-          Number(r.id_hierarchy_level),
-          r.id_company_office,
-          r.leader_user_id,
-          Number(r.is_leader)
-        ),
-        r
+      const key = membershipKey(
+        r.user_id,
+        r.id_hierarchy_level,
+        r.id_company_office,
+        r.leader_user_id,
+        Number(r.is_leader)
       );
+      byKey.set(key, r);
+      if (r.origin === 'GLIDE') glideByKey.set(key, r);
     }
   }
-  return byKey;
+  return { byKey, glideByKey };
 }
 
 async function applyMembershipFlagUpdates(targetConn, tgtDb, toUpdate) {
@@ -130,7 +141,7 @@ async function upsertMemberships(targetConn, tgtDb, pending) {
   if (!pending.length) return { inserted: 0, updated: 0, unchanged: 0, staleDeactivated: 0, portalClashes: 0 };
 
   const rebuiltIds = [...new Set(pending.map((p) => p[0]))];
-  const existing = await loadGlideMemberships(targetConn, tgtDb, rebuiltIds);
+  const { byKey, glideByKey } = await loadMemberships(targetConn, tgtDb, rebuiltIds);
   const keepIds = new Set();
   const toUpdate = [];
   const toInsert = [];
@@ -140,12 +151,15 @@ async function upsertMemberships(targetConn, tgtDb, pending) {
   for (const row of pending) {
     const [userId, level, office, leader, isLeader, isPrimary, isActive] = row;
     const key = membershipKey(userId, level, office, leader, isLeader);
-    const ex = existing.get(key);
+    const ex = byKey.get(key);
     if (!levelsByUser.has(userId)) levelsByUser.set(userId, new Set());
     levelsByUser.get(userId).add(level);
     if (ex) {
       keepIds.add(Number(ex.membership_id));
-      if (Number(ex.is_primary) === Number(isPrimary) && Number(ex.is_active) === Number(isActive)) {
+      const sameFlags =
+        Number(ex.is_primary) === Number(isPrimary) && Number(ex.is_active) === Number(isActive);
+      // Una fila PORTAL en el mismo slot se reclama como GLIDE (el UPDATE pone origin).
+      if (ex.origin === 'GLIDE' && sameFlags) {
         unchanged += 1;
       } else {
         toUpdate.push([Number(ex.membership_id), isPrimary, isActive]);
@@ -167,14 +181,19 @@ async function upsertMemberships(targetConn, tgtDb, pending) {
     for (let i = 0; i < toInsert.length; i += BATCH_SIZE) {
       const chunk = toInsert.slice(i, i + BATCH_SIZE);
       const [result] = await targetConn.query(
-        `${head} ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, 'GLIDE')").join(', ')}`,
+        `${head} ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?, 'GLIDE')").join(', ')}
+         ON DUPLICATE KEY UPDATE
+           is_primary = VALUES(is_primary),
+           is_active = VALUES(is_active),
+           origin = 'GLIDE',
+           end_date = IF(VALUES(is_active) = 1, NULL, COALESCE(end_date, CURDATE()))`,
         chunk.flat()
       );
       inserted += result.affectedRows;
     }
   }
 
-  const staleIds = [...existing.values()]
+  const staleIds = [...glideByKey.values()]
     .map((r) => Number(r.membership_id))
     .filter((id) => !keepIds.has(id));
   const staleDeactivated = await deactivateMemberships(targetConn, tgtDb, staleIds);
@@ -281,7 +300,7 @@ async function populateHierarchyMembership(sourceConn, targetConn, { truncate = 
       if (seen.has(primaryKey)) return;
       seen.add(primaryKey);
     }
-    const key = `${userId}:${level}:${idCompanyOffice ?? ''}:${leaderUserId ?? ''}:${leaderFlag}`;
+    const key = membershipKey(userId, level, idCompanyOffice, leaderUserId, leaderFlag);
     if (seen.has(key)) return;
     seen.add(key);
     pending.push([userId, level, idCompanyOffice, leaderUserId, leaderFlag, isPrimary ? 1 : 0, activeFlag]);
