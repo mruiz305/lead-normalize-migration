@@ -113,11 +113,65 @@ async function loadAttorneyMap(targetConn) {
   return { byName, resolveAttorneyId };
 }
 
+function normCatalogText(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+}
+
+/**
+ * Ids cuyo nombre, firma o grupo cambiaron. Esos tres campos van denormalizados
+ * en v_tblLeads (attorney, attyFirm, attyContractGroup). Un abogado nuevo no
+ * entra: todavía no hay leads que lo apunten.
+ */
+function changedAttorneyIds(previous, nextRows) {
+  const ids = [];
+  for (const row of nextRows) {
+    const id = Number(row[0]);
+    const prev = previous.get(id);
+    if (!prev) continue;
+    const same =
+      normCatalogText(prev.display_name) === normCatalogText(row[1]) &&
+      normCatalogText(prev.firm_name) === normCatalogText(row[2]) &&
+      normCatalogText(prev.contract_group) === normCatalogText(row[3]);
+    if (!same) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * tblLeads_mat y el datamart solo reescriben un lead si su grafo movió updated_at.
+ * Recargar ref_attorney no lo mueve, así que el nombre viejo del abogado queda
+ * en la foto. Esto marca lead_legal para que la próxima materialización lo tome.
+ */
+async function touchLeadsForAttorneys(targetConn, ids) {
+  if (!ids.length) return 0;
+  const tgt = config.target.database;
+  let touched = 0;
+  const chunk = 200;
+  for (let i = 0; i < ids.length; i += chunk) {
+    const slice = ids.slice(i, i + chunk);
+    const ph = slice.map(() => '?').join(', ');
+    const [result] = await targetConn.query(
+      `UPDATE \`${tgt}\`.lead_legal SET updated_at = NOW() WHERE id_attorney IN (${ph})`,
+      slice
+    );
+    touched += Number(result.affectedRows || 0);
+  }
+  return touched;
+}
+
 /** Sync prod refAttorneys → ref_attorney (id_state FK ref_state). */
 async function syncAttorneyCatalog(sourceConn, targetConn, stateMap = {}) {
   const src = config.source.database;
   const tgt = config.target.database;
   const { stateByName, stateByCode } = stateMap;
+
+  const [existing] = await targetConn.query(
+    `SELECT id_attorney, display_name, firm_name, contract_group
+     FROM \`${tgt}\`.ref_attorney`
+  );
+  const previous = new Map(existing.map((r) => [Number(r.id_attorney), r]));
 
   const [rows] = await sourceConn.query(`
     SELECT idAttorney, attorney, firm, contractGroup, emailSubjectPrefix, extEmailTargets,
@@ -126,9 +180,6 @@ async function syncAttorneyCatalog(sourceConn, targetConn, stateMap = {}) {
     FROM \`${src}\`.refAttorneys
     ORDER BY idAttorney
   `);
-
-  await targetConn.query('SET FOREIGN_KEY_CHECKS = 0');
-  await targetConn.query(`TRUNCATE TABLE \`${tgt}\`.ref_attorney`);
 
   const attorneyRows = [];
   let withState = 0;
@@ -159,22 +210,75 @@ async function syncAttorneyCatalog(sourceConn, targetConn, stateMap = {}) {
     ]);
   }
 
-  if (attorneyRows.length) {
-    const ph = attorneyRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ');
+  // Upsert en vez de TRUNCATE + INSERT: este sync corre cada pocos minutos y
+  // el catálogo lo leen el portal y el datamart mientras tanto. Un TRUNCATE
+  // deja la tabla vacía hasta que termina el INSERT (y para siempre si el
+  // INSERT falla), y como hay que apagar las FKs para poder truncar, un
+  // abogado borrado en prod dejaba lead_legal.id_attorney colgando sin aviso.
+  // Lo que desaparece de prod se marca inactivo y conserva su fila.
+  const { upserted, deactivated } = await upsertCatalogRows(targetConn, {
+    table: `\`${tgt}\`.ref_attorney`,
+    pk: 'id_attorney',
+    columns: [
+      'id_attorney', 'display_name', 'firm_name', 'contract_group',
+      'email_subject_prefix', 'ext_email_targets', 'internal_source', 'is_active', 'id_state',
+      'is_emails_enabled', 'is_emails_ld_enabled', 'is_misc',
+      'is_standard', 'is_active_on_portal', 'updated_at',
+    ],
+    rows: attorneyRows,
+  });
+
+  const changedIds = changedAttorneyIds(previous, attorneyRows);
+  const leadsTouched = await touchLeadsForAttorneys(targetConn, changedIds);
+
+  return {
+    attorneys: attorneyRows.length,
+    withState,
+    changedIds,
+    leadsTouched,
+    upserted,
+    deactivated,
+  };
+}
+
+/**
+ * INSERT … ON DUPLICATE KEY UPDATE por PK de origen, más is_active = 0 para
+ * las filas locales que ya no vienen de prod. Si prod no devuelve nada no se
+ * apaga nada: una consulta vacía es más probable que un catálogo borrado.
+ *
+ * @param {{ table: string, pk: string, columns: string[], rows: any[][],
+ *           valueSql?: (col: string) => string }} spec
+ *   valueSql permite envolver un placeholder (p. ej. ST_GeomFromText(?, 0)).
+ */
+async function upsertCatalogRows(targetConn, { table, pk, columns, rows, valueSql }) {
+  if (!rows.length) {
+    return { upserted: 0, deactivated: 0 };
+  }
+  const rowPh = `(${columns.map((c) => (valueSql ? valueSql(c) : '?')).join(', ')})`;
+  const updates = columns
+    .filter((c) => c !== pk)
+    .map((c) => `\`${c}\` = VALUES(\`${c}\`)`)
+    .join(', ');
+  const chunk = 200;
+  let upserted = 0;
+  for (let i = 0; i < rows.length; i += chunk) {
+    const slice = rows.slice(i, i + chunk);
     await targetConn.query(
-      `INSERT INTO \`${tgt}\`.ref_attorney (
-        id_attorney, display_name, firm_name, contract_group,
-        email_subject_prefix, ext_email_targets, internal_source, is_active, id_state,
-        is_emails_enabled, is_emails_ld_enabled, is_misc,
-        is_standard, is_active_on_portal, updated_at
-      ) VALUES ${ph}`,
-      attorneyRows.flat()
+      `INSERT INTO ${table} (${columns.map((c) => `\`${c}\``).join(', ')})
+       VALUES ${slice.map(() => rowPh).join(', ')}
+       ON DUPLICATE KEY UPDATE ${updates}`,
+      slice.flat()
     );
+    upserted += slice.length;
   }
 
-  await targetConn.query('SET FOREIGN_KEY_CHECKS = 1');
-
-  return { attorneys: attorneyRows.length, withState };
+  const ids = rows.map((r) => r[0]);
+  const [gone] = await targetConn.query(
+    `UPDATE ${table} SET is_active = 0
+     WHERE is_active = 1 AND \`${pk}\` NOT IN (${ids.map(() => '?').join(', ')})`,
+    ids
+  );
+  return { upserted, deactivated: Number(gone.affectedRows || 0) };
 }
 
 async function migrateLegacyRefAttorneys(targetConn, stateMap) {
@@ -193,6 +297,8 @@ module.exports = {
   normalizeAttorneyLookup,
   parseStatesText,
   resolvePrimaryStateId,
+  changedAttorneyIds,
+  upsertCatalogRows,
   loadAttorneyMap,
   syncAttorneyCatalog,
   migrateLegacyRefAttorneys,

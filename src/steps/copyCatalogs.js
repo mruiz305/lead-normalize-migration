@@ -117,6 +117,9 @@ async function runCopyCatalogs({ dryRun = false } = {}) {
       const stateMap = await loadStateMap(targetConn);
       const attorneyStats = await syncAttorneyCatalog(sourceConn, targetConn, stateMap);
       console.log(`  ✓ ref_attorney: ${attorneyStats.attorneys} (${attorneyStats.withState} con id_state)`);
+      if (attorneyStats.leadsTouched) {
+        console.log(`    · ${attorneyStats.leadsTouched} leads con abogado actualizado`);
+      }
       const txStats = await syncTxLocationCatalog(sourceConn, targetConn, stateMap);
       console.log(`  ✓ ref_tx_location: ${txStats.locations} (${txStats.withState} con id_state)`);
       const insStats = await syncInsuranceCatalog(sourceConn, targetConn, { truncate: true });

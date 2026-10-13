@@ -65,9 +65,30 @@ async function* readSourcePages(sourceConn, sourceTable, select, since) {
   }
 }
 
-async function flush(targetConn, table, columns, batch) {
+/**
+ * Glide renumera los Id de las tablas de una fila por lead: el mismo Id pasa a
+ * otro lead. Upsertear por PK movería esa fila a un id_lead que todavía ocupa
+ * otra, y UNIQUE(id_lead) lo rechaza. Para esas tablas la identidad es el lead,
+ * así que se borran las filas locales que chocan por Id o por lead con otra
+ * pareja antes de escribir.
+ */
+async function deleteReassigned(targetConn, spec, slice) {
+  const db = config.target.database;
+  const pk = spec.columns[0];
+  const leadIdx = spec.columns.indexOf('id_lead');
+  const pairs = slice.map((row) => [row[0], row[leadIdx]]);
+  await targetConn.query(
+    `DELETE FROM \`${db}\`.${spec.table}
+     WHERE (${pk} IN (?) OR id_lead IN (?))
+       AND (${pk}, id_lead) NOT IN (${pairs.map(() => '(?, ?)').join(', ')})`,
+    [pairs.map((p) => p[0]), pairs.map((p) => p[1]), ...pairs.flat()]
+  );
+}
+
+async function flush(targetConn, spec, batch) {
   if (!batch.length) return 0;
   const db = config.target.database;
+  const { table, columns } = spec;
   const ph = `(${columns.map(() => '?').join(', ')})`;
   // La PK es la identidad de origen, así que un choque es una fila que Glide
   // ya nos había dado y volvió a cambiar.
@@ -79,12 +100,20 @@ async function flush(targetConn, table, columns, batch) {
   let written = 0;
   for (let i = 0; i < batch.length; i += WRITE_BATCH) {
     const slice = batch.slice(i, i + WRITE_BATCH);
-    await targetConn.query(
-      `INSERT INTO \`${db}\`.${table} (${columns.join(', ')})
-       VALUES ${slice.map(() => ph).join(', ')}
-       ON DUPLICATE KEY UPDATE ${update}`,
-      slice.flat()
-    );
+    await targetConn.beginTransaction();
+    try {
+      if (spec.uniqueLead) await deleteReassigned(targetConn, spec, slice);
+      await targetConn.query(
+        `INSERT INTO \`${db}\`.${table} (${columns.join(', ')})
+         VALUES ${slice.map(() => ph).join(', ')}
+         ON DUPLICATE KEY UPDATE ${update}`,
+        slice.flat()
+      );
+      await targetConn.commit();
+    } catch (err) {
+      await targetConn.rollback();
+      throw err;
+    }
     written += slice.length;
   }
   return written;
@@ -127,7 +156,7 @@ async function mirrorGlideTable(sourceConn, targetConn, spec, { full = false, on
       batch.push(spec.mapRow(r, idLead));
     }
     const toWrite = spec.uniqueLead ? dedupeByLead(batch, spec) : batch;
-    written += await flush(targetConn, spec.table, spec.columns, toWrite);
+    written += await flush(targetConn, spec, toWrite);
     if (onProgress) onProgress({ read, written, sinLead });
   }
 
@@ -137,5 +166,6 @@ async function mirrorGlideTable(sourceConn, targetConn, spec, { full = false, on
 module.exports = {
   OVERLAP_MINUTES,
   resolveSince,
+  flush,
   mirrorGlideTable,
 };

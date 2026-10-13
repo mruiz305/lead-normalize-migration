@@ -5,6 +5,7 @@ const {
   normalizeAttorneyLookup,
   parseStatesText,
   resolvePrimaryStateId,
+  changedAttorneyIds,
 } = require("../src/migration/attorneyCatalog");
 
 describe("normalizeAttorneyLookup", () => {
@@ -46,5 +47,20 @@ describe("parseStatesText / resolvePrimaryStateId", () => {
       resolvePrimaryStateId("Smith PA", "Texas, Florida", { stateByName, stateByCode }),
       12
     );
+  });
+});
+
+describe("changedAttorneyIds", () => {
+  it("detecta cambio de nombre, firma o grupo y ignora un abogado nuevo", () => {
+    const previous = new Map([
+      [1, { display_name: "Smith PA", firm_name: "Smith", contract_group: "A" }],
+      [2, { display_name: "Jones LLC", firm_name: "Jones", contract_group: "B" }],
+    ]);
+    const next = [
+      [1, "Smith Law", "Smith", "A"],
+      [2, "Jones LLC", "Jones", "B"],
+      [3, "Nuevo", "Nuevo", "C"],
+    ];
+    assert.deepEqual(changedAttorneyIds(previous, next), [1]);
   });
 });

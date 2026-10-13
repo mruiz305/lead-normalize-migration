@@ -1,5 +1,5 @@
 const config = require('../config');
-const { resolvePrimaryStateId } = require('./attorneyCatalog');
+const { resolvePrimaryStateId, upsertCatalogRows } = require('./attorneyCatalog');
 
 function prodStatusToActive(status) {
   return String(status || '').trim().toUpperCase() === 'ACTIVE' ? 1 : 0;
@@ -66,9 +66,6 @@ async function syncTxLocationCatalog(sourceConn, targetConn, stateMap = {}) {
     ORDER BY idTXLocation
   `);
 
-  await targetConn.query('SET FOREIGN_KEY_CHECKS = 0');
-  await targetConn.query(`TRUNCATE TABLE \`${tgt}\`.ref_tx_location`);
-
   const insertRows = [];
   let withState = 0;
 
@@ -96,21 +93,21 @@ async function syncTxLocationCatalog(sourceConn, targetConn, stateMap = {}) {
     ]);
   }
 
-  if (insertRows.length) {
-    const ph = insertRows.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ST_GeomFromText(?, 0), ?, ?)').join(', ');
-    await targetConn.query(
-      `INSERT INTO \`${tgt}\`.ref_tx_location (
-        id_tx_location, display_name, tx_group, location_type_code, address,
-        int_email_targets, ext_email_targets, is_active, id_state,
-        is_active_on_portal, coordinates, is_emails_enabled, is_emails_ld_enabled
-      ) VALUES ${ph}`,
-      insertRows.flat()
-    );
-  }
+  // Mismo criterio que ref_attorney: upsert por id de origen y baja lógica de
+  // lo que ya no está en prod, nunca TRUNCATE (ver upsertCatalogRows).
+  const { upserted, deactivated } = await upsertCatalogRows(targetConn, {
+    table: `\`${tgt}\`.ref_tx_location`,
+    pk: 'id_tx_location',
+    columns: [
+      'id_tx_location', 'display_name', 'tx_group', 'location_type_code', 'address',
+      'int_email_targets', 'ext_email_targets', 'is_active', 'id_state',
+      'is_active_on_portal', 'coordinates', 'is_emails_enabled', 'is_emails_ld_enabled',
+    ],
+    rows: insertRows,
+    valueSql: (col) => (col === 'coordinates' ? 'ST_GeomFromText(?, 0)' : '?'),
+  });
 
-  await targetConn.query('SET FOREIGN_KEY_CHECKS = 1');
-
-  return { locations: insertRows.length, withState };
+  return { locations: insertRows.length, withState, upserted, deactivated };
 }
 
 async function migrateLegacyRefTXLocations(targetConn, stateMap) {

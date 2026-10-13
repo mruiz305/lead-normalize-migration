@@ -14,7 +14,7 @@ const config = require('../src/config');
 
 const SCRIPT = process.env.PROCESS_NAME_INTAKE_SYNC || 'TNFG_INTAKE_SYNC';
 const CRON_CODE = 'INTAKE_SYNC_10M';
-const DESC = 'Sync incremental prod → TNFG_INTAKE (leads + ref_attorney)';
+const DESC = 'Sync incremental prod → TNFG_INTAKE (leads + abogados + clínicas)';
 
 function parseArgs(argv) {
   const i = argv.indexOf('--expression');

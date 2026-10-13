@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Resync TNFG_INTAKE.ref_attorney desde prod.refAttorneys (truncate + reload).
+ * Resync TNFG_INTAKE.ref_attorney desde prod.refAttorneys (upsert + baja lógica).
  * Uso: node scripts/sync-ref-attorney.js [--dry-run]
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
@@ -33,7 +33,14 @@ async function main() {
 
       const stateMap = await loadStateMap(targetConn);
       const stats = await syncAttorneyCatalog(sourceConn, targetConn, stateMap);
-      console.log(`\n✓ ref_attorney: ${stats.attorneys} (${stats.withState} con id_state)`);
+      console.log(
+        `\n✓ ref_attorney: ${stats.attorneys} (${stats.withState} con id_state)` +
+          (stats.deactivated ? ` · ${stats.deactivated} ya no están en prod → inactivos` : '')
+      );
+      console.log(
+        `  abogados con nombre, firma o grupo distintos: ${stats.changedIds.length}` +
+          ` · leads marcados para reescribir: ${stats.leadsTouched}`
+      );
 
       // spot-check known mismatches
       const [check] = await targetConn.query(

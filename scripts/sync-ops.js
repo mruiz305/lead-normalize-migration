@@ -3,19 +3,23 @@
  * Un ciclo operativo prod → TNFG_INTAKE (incremental).
  *
  * Por defecto (vía sync:cron / CronManager):
- *   1) sync:ref-attorney
- *   2) sync:users (g_users → app_user por rowId)
- *   3) sync:incremental
- *   4) migrate:gaps (src sin lead)
- *   5) sync:glide-mirrors (estado operativo y legal que el tablero lee)
- *   6) backfill:attorney-miss
- *   7) sync:lead-comments -- --resume
+ *   1) sync:ref-attorney          (prod.refAttorneys → ref_attorney)
+ *   2) sync:ref-tx-location       (prod.refTXLocations → ref_tx_location, clínicas)
+ *   3) sync:users (g_users → app_user por rowId)
+ *   4) sync:incremental
+ *   5) migrate:gaps (src sin lead)
+ *   6) sync:glide-mirrors (estado operativo y legal que el tablero lee)
+ *   7) backfill:attorney-miss
+ *   8) sync:lead-comments -- --resume
+ *
+ * Los catálogos van antes del incremental: un abogado o clínica nuevo en prod
+ * tiene que existir en destino para que el remigrate resuelva la FK del lead.
  *
  * El datamart ETL es independiente (su propio cron: ETL_DM_CRON).
  *
  * Opcionales: --with-catalogs --with-legacy-ops
- *             --skip-attorney --skip-users --skip-leads --skip-comments --skip-backfill
- *             --skip-mirrors
+ *             --skip-attorney --skip-clinics --skip-users --skip-leads
+ *             --skip-comments --skip-backfill --skip-mirrors
  *
  * Uso:
  *   npm run sync:ops
@@ -35,6 +39,7 @@ function parseArgs(argv) {
     withLegacyOps: argv.includes('--with-legacy-ops'),
     skipUsers: argv.includes('--skip-users'),
     skipAttorney: argv.includes('--skip-attorney'),
+    skipClinics: argv.includes('--skip-clinics'),
     skipLeads: argv.includes('--skip-leads'),
     skipComments: argv.includes('--skip-comments'),
     skipBackfill: argv.includes('--skip-backfill'),
@@ -72,8 +77,9 @@ function plan(opts) {
   const steps = [];
   if (opts.withCatalogs) {
     steps.push({ script: 'copy-catalogs', args: [] });
-  } else if (!opts.skipAttorney) {
-    steps.push({ script: 'sync:ref-attorney', args: [] });
+  } else {
+    if (!opts.skipAttorney) steps.push({ script: 'sync:ref-attorney', args: [] });
+    if (!opts.skipClinics) steps.push({ script: 'sync:ref-tx-location', args: [] });
   }
   if (!opts.skipUsers) {
     steps.push({ script: 'sync:users', args: [] });
