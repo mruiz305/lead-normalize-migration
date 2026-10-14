@@ -53,7 +53,55 @@ async function loadTxLocationMap(targetConn) {
   return { byName, resolveTxLocationId };
 }
 
-/** Sync prod refTXLocations → ref_tx_location. */
+/**
+ * Coordenadas de la ubicación del portal (case_service.tx_location). Prod las
+ * tiene malas en muchas clínicas: el centro de EEUU con los ejes invertidos
+ * (todas las MHC) o el centro de la ciudad. El portal guarda latitud/longitud
+ * por dirección. Base configurable; vive en el mismo servidor que el destino.
+ */
+const PORTAL_CASE_DATABASE = (process.env.MIG_PORTAL_CASE_DATABASE || 'case_service_dev').trim();
+
+function normName(v) {
+  return String(v == null ? '' : v).trim().toLowerCase();
+}
+
+/**
+ * WKT en el orden que usa la API (ST_X = longitud, ST_Y = latitud).
+ * null si el par no es usable.
+ */
+function portalPointWkt(latitude, longitude) {
+  if (latitude == null || longitude == null) return null;
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  if (lat === 0 && lng === 0) return null;
+  return `POINT(${lng} ${lat})`;
+}
+
+/** name (normalizado) → WKT. Si la base o la tabla no existen, mapa vacío. */
+async function loadPortalCoordinates(targetConn) {
+  try {
+    const [rows] = await targetConn.query(
+      `SELECT name, latitude, longitude FROM \`${PORTAL_CASE_DATABASE}\`.tx_location
+       WHERE latitude IS NOT NULL AND longitude IS NOT NULL`
+    );
+    const byName = new Map();
+    for (const r of rows) {
+      const wkt = portalPointWkt(r.latitude, r.longitude);
+      if (wkt) byName.set(normName(r.name), wkt);
+    }
+    return byName;
+  } catch (err) {
+    if (err.code === 'ER_NO_SUCH_TABLE' || err.code === 'ER_BAD_DB_ERROR' || err.code === 'ER_DBACCESS_DENIED_ERROR' || err.code === 'ER_TABLEACCESS_DENIED_ERROR') {
+      console.warn(`  ⚠ coordenadas del portal no disponibles (${PORTAL_CASE_DATABASE}.tx_location): ${err.code}`);
+      return new Map();
+    }
+    throw err;
+  }
+}
+
+/** Sync prod refTXLocations → ref_tx_location. Coordenadas: portal primero, prod si falta. */
 async function syncTxLocationCatalog(sourceConn, targetConn, stateMap = {}) {
   const src = config.source.database;
   const tgt = config.target.database;
@@ -66,8 +114,11 @@ async function syncTxLocationCatalog(sourceConn, targetConn, stateMap = {}) {
     ORDER BY idTXLocation
   `);
 
+  const portalCoords = await loadPortalCoordinates(targetConn);
+
   const insertRows = [];
   let withState = 0;
+  let fromPortal = 0;
 
   for (const r of rows) {
     const displayName = trimOrNull(r.txLocation);
@@ -75,6 +126,9 @@ async function syncTxLocationCatalog(sourceConn, targetConn, stateMap = {}) {
 
     const idState = resolvePrimaryStateId(displayName, r.state, stateMap);
     if (idState) withState += 1;
+
+    const portalWkt = portalCoords.get(normName(displayName));
+    if (portalWkt) fromPortal += 1;
 
     insertRows.push([
       r.idTXLocation,
@@ -87,7 +141,7 @@ async function syncTxLocationCatalog(sourceConn, targetConn, stateMap = {}) {
       prodStatusToActive(r.status),
       idState,
       bitToBool(r.activeOnPortal),
-      r.coordinates_wkt || 'POINT(0 0)',
+      portalWkt || r.coordinates_wkt || 'POINT(0 0)',
       r.emails != null ? Number(r.emails) : 1,
       r.emailsLD != null ? Number(r.emailsLD) : 1,
     ]);
@@ -107,7 +161,7 @@ async function syncTxLocationCatalog(sourceConn, targetConn, stateMap = {}) {
     valueSql: (col) => (col === 'coordinates' ? 'ST_GeomFromText(?, 0)' : '?'),
   });
 
-  return { locations: insertRows.length, withState, upserted, deactivated };
+  return { locations: insertRows.length, withState, fromPortal, upserted, deactivated };
 }
 
 async function migrateLegacyRefTXLocations(targetConn, stateMap) {
@@ -128,6 +182,7 @@ async function migrateLegacyRefTXLocations(targetConn, stateMap) {
 }
 
 module.exports = {
+  portalPointWkt,
   loadTxLocationMap,
   syncTxLocationCatalog,
   migrateLegacyRefTXLocations,

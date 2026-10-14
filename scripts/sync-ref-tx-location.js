@@ -35,7 +35,8 @@ async function main() {
       const stats = await syncTxLocationCatalog(sourceConn, targetConn, stateMap);
       console.log(
         `\n✓ ref_tx_location: ${stats.locations} (${stats.withState} con id_state)` +
-          (stats.deactivated ? ` · ${stats.deactivated} ya no están en prod → inactivos` : '')
+          (stats.deactivated ? ` · ${stats.deactivated} ya no están en prod → inactivos` : '') +
+          ` · ${stats.fromPortal} con coordenadas del portal`
       );
     });
   });
