@@ -20,6 +20,16 @@ describe('sync:ops plan', () => {
     assert.equal(steps.includes('sync:ref-tx-location'), false);
   });
 
+  it('copia el mapper de nombres de abogado junto con los abogados', () => {
+    assert.equal(plan(parseArgs([])).some((s) => s.script === 'sync:attorney-mapper'), true);
+    assert.equal(plan(parseArgs(['--skip-attorney'])).some((s) => s.script === 'sync:attorney-mapper'), false);
+  });
+
+  it('sincroniza la lista especial en cada ciclo, salvo --skip-special-list', () => {
+    assert.equal(plan(parseArgs([])).some((s) => s.script === 'sync:special-list'), true);
+    assert.equal(plan(parseArgs(['--skip-special-list'])).some((s) => s.script === 'sync:special-list'), false);
+  });
+
   it('--with-catalogs no duplica el sync puntual', () => {
     const steps = plan(parseArgs(['--with-catalogs'])).map((s) => s.script);
     assert.equal(steps.includes('copy-catalogs'), true);

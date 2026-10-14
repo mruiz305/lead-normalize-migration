@@ -5,6 +5,8 @@
  * Por defecto (vía sync:cron / CronManager):
  *   1) sync:ref-attorney          (prod.refAttorneys → ref_attorney)
  *   2) sync:ref-tx-location       (prod.refTXLocations → ref_tx_location, clínicas)
+ *      sync:special-list          (prod.SpecialList → ref_special_list, espejo)
+ *      sync:attorney-mapper       (prod.refAttorneys_portal_mapper → ref_attorney_portal_mapper)
  *   3) sync:users (g_users → app_user por rowId)
  *   4) sync:incremental
  *   5) migrate:gaps (src sin lead)
@@ -18,7 +20,7 @@
  * El datamart ETL es independiente (su propio cron: ETL_DM_CRON).
  *
  * Opcionales: --with-catalogs --with-legacy-ops
- *             --skip-attorney --skip-clinics --skip-users --skip-leads
+ *             --skip-attorney --skip-clinics --skip-special-list --skip-users --skip-leads
  *             --skip-comments --skip-backfill --skip-mirrors
  *
  * Uso:
@@ -40,6 +42,7 @@ function parseArgs(argv) {
     skipUsers: argv.includes('--skip-users'),
     skipAttorney: argv.includes('--skip-attorney'),
     skipClinics: argv.includes('--skip-clinics'),
+    skipSpecialList: argv.includes('--skip-special-list'),
     skipLeads: argv.includes('--skip-leads'),
     skipComments: argv.includes('--skip-comments'),
     skipBackfill: argv.includes('--skip-backfill'),
@@ -93,9 +96,14 @@ function plan(opts) {
   if (opts.withCatalogs) {
     steps.push({ script: 'copy-catalogs', args: [] });
   } else {
-    if (!opts.skipAttorney) steps.push({ script: 'sync:ref-attorney', args: [] });
+    if (!opts.skipAttorney) {
+      steps.push({ script: 'sync:ref-attorney', args: [] });
+      steps.push({ script: 'sync:attorney-mapper', args: [] });
+    }
     if (!opts.skipClinics) steps.push({ script: 'sync:ref-tx-location', args: [] });
   }
+  // La lista especial cambia el estado del log y el CNV en el datamart.
+  if (!opts.skipSpecialList) steps.push({ script: 'sync:special-list', args: [] });
   if (!opts.skipUsers) {
     steps.push({ script: 'sync:users', args: [] });
   }

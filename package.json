@@ -42,6 +42,8 @@
     "backfill:attorney-miss": "node scripts/backfill-attorney-catalog-miss.js",
     "sync:ref-attorney": "node scripts/sync-ref-attorney.js",
     "sync:ref-tx-location": "node scripts/sync-ref-tx-location.js",
+    "sync:special-list": "node scripts/sync-special-list.js",
+    "sync:attorney-mapper": "node scripts/sync-attorney-mapper.js",
     "reload:full": "node scripts/reload-full.js",
     "sync:incremental": "node scripts/sync-incremental.js",
     "sync:ops": "node scripts/sync-ops.js",
