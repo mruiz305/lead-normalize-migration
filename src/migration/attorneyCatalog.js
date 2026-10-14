@@ -32,21 +32,41 @@ function bitToBool(v) {
   return v ? 1 : 0;
 }
 
-/** Un estado por abogado: nombre (FL/TX) → prod states → preferir Florida si hay varios. */
+/**
+ * Estado escrito entre paréntesis en cualquier parte del nombre: "(FL)",
+ * "(Texas)", "(North Carolina) - …", "(Washington, D.C.) - …",
+ * "(Florida Non Standard)". El primero que resuelve gana.
+ */
+function stateFromParentheses(name, { stateByName, stateByCode } = {}) {
+  for (const m of String(name || '').matchAll(/\(([^)]+)\)/g)) {
+    const token = m[1].trim();
+    if (!token) continue;
+    if (/^[A-Za-z]{2}$/.test(token)) {
+      const byCode = stateByCode?.get(token.toUpperCase());
+      if (byCode) return byCode;
+    }
+    const lower = token.toLowerCase();
+    const exact = stateByName.get(lower);
+    if (exact) return exact;
+    for (const [stateName, idState] of stateByName) {
+      if (lower.startsWith(`${stateName},`) || lower.startsWith(`${stateName} `)) return idState;
+    }
+  }
+  return null;
+}
+
+/**
+ * Un estado por abogado o clínica: paréntesis del nombre → nombre de estado
+ * contenido en el nombre → prod states (preferir Florida si hay varios).
+ * El paréntesis va primero porque el resto del nombre puede ser una calle:
+ * "MHC HealthCare Clinic (Maryland) - Silver Spring Georgia Ave" es Maryland.
+ */
 function resolvePrimaryStateId(displayName, statesText, { stateByName, stateByCode } = {}) {
   if (!stateByName?.size) return null;
 
   const name = String(displayName || '').trim();
-  const paren = name.match(/\(([A-Za-z]{2,})\)\s*$/);
-  if (paren) {
-    const token = paren[1].trim();
-    if (token.length === 2) {
-      const byCode = stateByCode?.get(token.toUpperCase());
-      if (byCode) return byCode;
-    }
-    const byName = stateByName.get(token.toLowerCase());
-    if (byName) return byName;
-  }
+  const fromParen = stateFromParentheses(name, { stateByName, stateByCode });
+  if (fromParen) return fromParen;
 
   const lowerName = name.toLowerCase();
   for (const [stateName, idState] of stateByName) {
