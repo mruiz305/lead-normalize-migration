@@ -661,7 +661,7 @@ SELECT id_state, 1.00, 1 FROM ref_state WHERE state_name = 'Minnesota' LIMIT 1;
 INSERT IGNORE INTO ref_state_cnv (id_state, cnv_value, is_active)
 SELECT id_state, 1.00, 1 FROM ref_state WHERE state_name = 'Mississippi' LIMIT 1;
 INSERT IGNORE INTO ref_state_cnv (id_state, cnv_value, is_active)
-SELECT id_state, 1.00, 1 FROM ref_state WHERE state_name = 'Missouri' LIMIT 1;
+SELECT id_state, 0.50, 1 FROM ref_state WHERE state_name = 'Missouri' LIMIT 1;
 INSERT IGNORE INTO ref_state_cnv (id_state, cnv_value, is_active)
 SELECT id_state, 1.00, 1 FROM ref_state WHERE state_name = 'Montana' LIMIT 1;
 INSERT IGNORE INTO ref_state_cnv (id_state, cnv_value, is_active)
