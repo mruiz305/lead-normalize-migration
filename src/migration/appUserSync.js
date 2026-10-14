@@ -1,5 +1,5 @@
 const config = require('../config');
-const { loadCompanyOfficeMap } = require('./officeCatalog');
+const { loadCompanyOfficeMap, appendMissingOfficesFromGUsers } = require('./officeCatalog');
 const { isActiveHr } = require('./userHrPeriod');
 const {
   resolveHrDealGoal,
@@ -288,11 +288,16 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
 
   let schema = { changes: [] };
   let subOfficeCatalog = { sourceDistinct: 0, inserted: 0 };
+  let companyOfficeCatalog = { added: 0, codes: [] };
   if (!dryRun) {
     schema = await ensureAppUserRowIdKey(targetConn);
     const extras = await ensureAppUserExtraColumns(targetConn);
     schema.changes = [...(schema.changes || []), ...extras.added];
     subOfficeCatalog = await ensureSubOfficeCatalogFromGUsers(sourceConn, targetConn);
+    // Oficinas nuevas en prod (ej. JCK-MCO desde ago 2026) llegan al catálogo antes de
+    // mapear usuarios; si no, g_users.office queda NULL y el datamart borra officeLabel.
+    // Mismas reglas que sync:offices: sin COR *, solo usuarios activos con región.
+    companyOfficeCatalog = await appendMissingOfficesFromGUsers(sourceConn, targetConn);
   }
   const maps = await loadCatalogMaps(targetConn);
   if (!dryRun) {
@@ -355,6 +360,7 @@ async function upsertAppUsersFromGUsers(sourceConn, targetConn, {
     beforeCount: Number(beforeCount),
     afterCount: dryRun ? Number(beforeCount) : Number(afterCount),
     subOfficeCatalog,
+    companyOfficeCatalog,
     schema,
   };
 }

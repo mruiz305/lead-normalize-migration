@@ -64,6 +64,11 @@ async function main() {
       }
       if (!dryRun) {
         console.log(`  app_user:    ${stats.beforeCount} → ${stats.afterCount}`);
+        if (stats.companyOfficeCatalog?.added) {
+          console.log(
+            `  ref_company_office: +${stats.companyOfficeCatalog.added} nuevas (${stats.companyOfficeCatalog.codes.join(', ')})`
+          );
+        }
         if (stats.subOfficeCatalog) {
           console.log(
             `  ref_sub_office: ${stats.subOfficeCatalog.sourceDistinct} códigos prod` +
