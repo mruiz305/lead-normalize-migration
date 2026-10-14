@@ -26,7 +26,7 @@
  *   npm run sync:ops -- --dry-run
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
-const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const path = require('path');
 const { formatDuration } = require('../src/utils/timing');
 
@@ -55,22 +55,37 @@ function parseArgs(argv) {
   };
 }
 
+/**
+ * spawn asíncrono, no spawnSync: este módulo corre dentro del proceso del
+ * cron (sync:cron), y un spawnSync congela el event loop durante todo el paso.
+ * node-cron no podía ni disparar los ticks ni marcar el solape, y llenaba el
+ * log con "missed execution … Possible blocking IO". Con spawn el tick llega,
+ * el guard `running` lo descarta y queda una línea de skip, no un warning.
+ */
 function runNpm(script, args = []) {
   const label = `${script}${args.length ? ' ' + args.join(' ') : ''}`;
   console.log(`\n→ npm run ${label}`);
   const t0 = Date.now();
-  const r = spawnSync('npm', ['run', script, ...(args.length ? ['--', ...args] : [])], {
-    cwd: ROOT,
-    stdio: 'inherit',
-    env: process.env,
+  return new Promise((resolve, reject) => {
+    const child = spawn('npm', ['run', script, ...(args.length ? ['--', ...args] : [])], {
+      cwd: ROOT,
+      stdio: 'inherit',
+      env: process.env,
+    });
+    child.on('error', (err) => {
+      reject(new Error(`No se pudo lanzar npm run ${script}: ${err.message}`));
+    });
+    child.on('close', (status) => {
+      const elapsed = Date.now() - t0;
+      if (status !== 0) {
+        console.error(`  ✗ ${label} falló tras ${formatDuration(elapsed)}`);
+        reject(new Error(`Falló: npm run ${script} (exit ${status})`));
+        return;
+      }
+      console.log(`  ⏱ ${label}: ${formatDuration(elapsed)}`);
+      resolve(elapsed);
+    });
   });
-  const elapsed = Date.now() - t0;
-  if (r.status !== 0) {
-    console.error(`  ✗ ${label} falló tras ${formatDuration(elapsed)}`);
-    throw new Error(`Falló: npm run ${script} (exit ${r.status})`);
-  }
-  console.log(`  ⏱ ${label}: ${formatDuration(elapsed)}`);
-  return elapsed;
 }
 
 function plan(opts) {
@@ -121,7 +136,7 @@ async function runSyncOps(argv = process.argv.slice(2)) {
   const t0 = Date.now();
   const timings = [];
   for (const s of steps) {
-    const ms = runNpm(s.script, s.args);
+    const ms = await runNpm(s.script, s.args);
     timings.push({
       step: `${s.script}${s.args.length ? ' ' + s.args.join(' ') : ''}`,
       ms,
