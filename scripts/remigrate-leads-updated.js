@@ -3,6 +3,10 @@
  * Re-migra leads cuyo `updated` es >= --since.
  * Actualiza `lead` y sus hijos in-place (mismo id_lead / id_client).
  *
+ * Leads nacidos en el portal (origin = PORTAL, espejados en prod): no se
+ * reconstruyen; solo se traen los campos que Glide administra (estado,
+ * abogado, clínica, fechas). Ver src/migration/portalLeadGlideFields.js.
+ *
  * Origen:
  *   default      TNFG_INTAKE.tblLeads_src
  *   --from-prod  dbProduction.tblLeads
@@ -14,6 +18,7 @@
  *   npm run remigrate:updated -- --since "2026-09-08 00:00:00" --from-prod
  *   npm run remigrate:updated -- --this-week --dry-run
  *   npm run remigrate:updated -- --since "2026-08-17 00:00:00"
+ *   npm run remigrate:updated -- --since "2025-01-01 00:00:00" --portal-only --dry-run
  */
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const config = require('../src/config');
@@ -30,6 +35,7 @@ const { syncAtFaultTypeCatalog } = require('../src/migration/atFaultTypeCatalog'
 const { seedAccidentLocationTypes } = require('../src/migration/accidentLocationTypeCatalog');
 const { seedSeverityLevels } = require('../src/migration/severityLevelCatalog');
 const { syncInjurySiteCatalog } = require('../src/migration/injurySiteCatalog');
+const { remigratePortalOwned, clockOffsetSeconds } = require('../src/migration/portalLeadGlideFields');
 
 const BATCH = Number(process.env.MIG_BATCH_SIZE || 100);
 const DEST_TABLE = process.env.MIG_SOURCE_LEADS_TABLE || 'tblLeads_src';
@@ -62,6 +68,7 @@ function parseArgs(argv) {
     fromProd: argv.includes('--from-prod'),
     dryRun: argv.includes('--dry-run'),
     deleteOnly: argv.includes('--delete-only'),
+    portalOnly: argv.includes('--portal-only'),
     skipDelete: argv.includes('--skip-delete'),
     limit: (() => {
       const i = argv.indexOf('--limit');
@@ -136,17 +143,25 @@ async function collectIds(conn, db, since) {
 }
 
 /**
- * Saca de TMP los idLead que en el modelo pertenecen a un lead del portal.
- * Sin esto los hijos del portal se borrarían, y el UPDATE chocaría
- * contra el UNIQUE de glide_id.
+ * Saca de TMP los idLead que en el modelo pertenecen a un lead del portal y
+ * los devuelve (glide_id → id_lead) para el remigrate parcial. El remigrate
+ * completo no puede tocarlos: la fila de prod es una copia reducida y el
+ * UPDATE chocaría contra el UNIQUE de glide_id.
  */
-async function dropPortalOwned(conn, db) {
-  const [r] = await conn.query(`
-    DELETE t FROM ${TMP} t
+async function collectPortalOwned(conn, db) {
+  const [rows] = await conn.query(`
+    SELECT l.glide_id, l.id_lead FROM ${TMP} t
     INNER JOIN \`${db}\`.\`lead\` l ON l.glide_id = t.id_lead
     WHERE l.origin = 'PORTAL'
   `);
-  return Number(r.affectedRows || 0);
+  const owned = new Map(rows.map((r) => [Number(r.glide_id), Number(r.id_lead)]));
+  if (owned.size) {
+    await conn.query(
+      `DELETE FROM ${TMP} WHERE id_lead IN (${[...owned.keys()].map(() => '?').join(',')})`,
+      [...owned.keys()]
+    );
+  }
+  return owned;
 }
 
 /** glide_id → id_lead: el UPDATE usa este PK; no se recicla. */
@@ -211,6 +226,32 @@ async function remigrateCollected(
   return { migrated, total: cap, pendingTotal, afterIdEnd: cursor };
 }
 
+async function runPortalOwned(readConn, targetConn, maps, portalOwned, opts, dryRun) {
+  console.log(`\nPaso 3: leads del portal — campos administrados en Glide${dryRun ? ' (dry-run)' : ''}…`);
+  // `updated` de tblLeads está en el reloj de prod aunque se lea del staging.
+  const sourceOffsetSeconds = await clockOffsetSeconds(sourcePool);
+  const targetOffsetSeconds = await clockOffsetSeconds(targetConn);
+  const stats = await remigratePortalOwned(readConn, targetConn, maps, portalOwned, {
+    readSql: leadsReadSql(opts.fromProd),
+    sourceOffsetSeconds,
+    targetOffsetSeconds,
+    dryRun,
+  });
+  console.log(
+    `  ✓ ${stats.leads} revisados · ${stats.leadsChanged} con diferencias` +
+      (dryRun ? '' : ` · ${stats.rowsWritten} filas escritas`) +
+      (stats.portalNewer ? ` · ${stats.portalNewer} con el portal más nuevo que prod (no se tocan)` : '') +
+      (stats.skippedFields ? ` · ${stats.skippedFields} campos conservados del portal (sin match en catálogo)` : '')
+  );
+  for (const s of stats.samples) {
+    console.log(
+      `    · glide ${s.glideId} → id_lead ${s.idLead}: ${s.diff.join(', ')}` +
+        (s.skipped.length ? ` [conservados: ${s.skipped.join(', ')}]` : '')
+    );
+  }
+  return stats;
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (!opts.since) {
@@ -244,7 +285,7 @@ async function main() {
       const ids = opts.fromProd
         ? await collectIdsFromProd(sourceConn, targetConn, opts.since)
         : await collectIds(targetConn, db, opts.since);
-      const skippedPortal = await dropPortalOwned(targetConn, db);
+      const portalOwned = await collectPortalOwned(targetConn, db);
       const [[inNorm]] = await targetConn.query(
         `SELECT COUNT(*) AS c FROM \`${db}\`.\`lead\` l
          INNER JOIN ${TMP} t ON t.id_lead = l.glide_id`
@@ -256,13 +297,17 @@ async function main() {
       );
 
       console.log(`IDs con updated >= since: ${ids.count}`);
-      if (skippedPortal) {
-        console.log(`  omitidos por ser del portal: ${skippedPortal}`);
+      if (portalOwned.size) {
+        console.log(`  del portal (solo campos Glide): ${portalOwned.size}`);
       }
       console.log(`  ya en modelo (se actualizan): ${inNorm.c}`);
       console.log(`  resto del modelo (intactos): ${keep.c}\n`);
 
       if (opts.dryRun) {
+        if (portalOwned.size) {
+          const maps = await loadCatalogMaps(targetConn);
+          await runPortalOwned(opts.fromProd ? sourceConn : targetConn, targetConn, maps, portalOwned, opts, true);
+        }
         console.log('(dry-run) no se actualizó nada');
         return;
       }
@@ -283,6 +328,9 @@ async function main() {
       await syncInjurySiteCatalog(sourceConn, targetConn, { truncate: false });
       const maps = await loadCatalogMaps(targetConn);
 
+      if (opts.portalOnly) {
+        console.log('Paso 2: omitido (--portal-only)');
+      } else {
       console.log(`Paso 2: actualizar desde ${opts.fromProd ? 'prod' : 'staging'}…`);
       if (preserveLeadIds.size) {
         console.log(`  actualizando el id_lead original de ${preserveLeadIds.size} leads`);
@@ -304,6 +352,11 @@ async function main() {
         `\n  ✓ ${result.migrated}/${result.total} leads — ${((Date.now() - started) / 1000).toFixed(0)}s` +
           (result.afterIdEnd ? ` (hasta idLead ${result.afterIdEnd})` : '')
       );
+      }
+
+      if (portalOwned.size) {
+        await runPortalOwned(opts.fromProd ? sourceConn : targetConn, targetConn, maps, portalOwned, opts, false);
+      }
     } finally {
       if (sourceConn) sourceConn.release();
     }
