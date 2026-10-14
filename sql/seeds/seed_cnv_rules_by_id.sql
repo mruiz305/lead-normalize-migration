@@ -13,6 +13,9 @@ SET @no_atty_id := (SELECT MAX(id_attorney) FROM ref_attorney WHERE display_name
 SET @hess_ny_ns_id := (SELECT MAX(id_attorney) FROM ref_attorney WHERE display_name = 'Hess Will Assign (New York) NS');
 SET @benenfeld_id := (SELECT MAX(id_attorney) FROM ref_attorney WHERE display_name = 'David M Benenfeld');
 SET @big_ben_llfl_id := (SELECT MAX(id_attorney) FROM ref_attorney WHERE display_name = 'Big Ben LLFL');
+-- UPDATE 9.3 de prod excluye a los abogados de Workers Comp de la ventana NY.
+SET @ny_wc_attorneys := (SELECT JSON_ARRAYAGG(id_attorney) FROM ref_attorney
+  WHERE display_name IN ('Bernheim Kelly Battista & Bliss (Wc)', 'Shulman & Hill (WC)', 'RTR (WC)'));
 
 DELETE FROM ref_cnv_rule WHERE rule_code LIKE 'cnv_%';
 
@@ -55,7 +58,7 @@ INSERT INTO ref_cnv_rule (rule_code, description, priority, cnv_value, condition
   JSON_OBJECT('id_tx_dim', 1, 'tx_location_in', JSON_ARRAY('COR Naples', 'COR North Jacksonville'), 'date_came_in_from', '2026-10-01', 'date_came_in_to', '2027-12-31', 'id_accident_state', 9, 'attorney_is_standard', true, 'pip_insurance_not', 'LOP', 'id_legal_dim_not_in', JSON_ARRAY(13))),
 
 ('cnv_ny_apr_jun_15', 'New York Abr 24 – Jun 14 2026 → 1.5', 820, 1.50,
-  JSON_OBJECT('date_came_in_from', '2026-04-24', 'date_came_in_before', '2026-06-15', 'id_accident_state', 32)),
+  JSON_OBJECT('date_came_in_from', '2026-04-24', 'date_came_in_before', '2026-06-15', 'id_accident_state', 32, 'id_attorney_not_in', @ny_wc_attorneys)),
 ('cnv_ny_shulman_jun_15', 'New York Jun 15-30 Shulman & Hill → 1.5', 821, 1.50,
   JSON_OBJECT('date_came_in_from', '2026-06-15', 'date_came_in_to', '2026-06-30', 'id_attorney', @shulman_id, 'id_accident_state', 32)),
 
