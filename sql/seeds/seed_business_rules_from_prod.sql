@@ -53,7 +53,7 @@ INSERT IGNORE INTO ref_log_status_rule (
 INSERT IGNORE INTO ref_log_status_rule (
   tag, tx_location_alias, visits_alias, ldot_alias, accident_state_alias,
   legal_status_alias, clinical_status_alias, id_log_status, legacy_rule_id, is_active
-) VALUES (NULL, 'COR/AFF', '<12V', '<30D', 'PIP STATE', 'SIGNED', 'DROPPED', 2, 13, 1);
+) VALUES (NULL, 'COR/AFF', '<12V', '<30D', 'PIP STATE', 'SIGNED', 'DROPPED', 1, 13, 1);
 INSERT IGNORE INTO ref_log_status_rule (
   tag, tx_location_alias, visits_alias, ldot_alias, accident_state_alias,
   legal_status_alias, clinical_status_alias, id_log_status, legacy_rule_id, is_active
@@ -121,7 +121,7 @@ INSERT IGNORE INTO ref_log_status_rule (
 INSERT IGNORE INTO ref_log_status_rule (
   tag, tx_location_alias, visits_alias, ldot_alias, accident_state_alias,
   legal_status_alias, clinical_status_alias, id_log_status, legacy_rule_id, is_active
-) VALUES (NULL, 'COR/AFF', '<12V', '>30D', 'PIP STATE', 'SIGNED', 'DROPPED', 2, 30, 1);
+) VALUES (NULL, 'COR/AFF', '<12V', '>30D', 'PIP STATE', 'SIGNED', 'DROPPED', 1, 30, 1);
 INSERT IGNORE INTO ref_log_status_rule (
   tag, tx_location_alias, visits_alias, ldot_alias, accident_state_alias,
   legal_status_alias, clinical_status_alias, id_log_status, legacy_rule_id, is_active
@@ -437,7 +437,7 @@ INSERT IGNORE INTO ref_log_status_rule (
 INSERT IGNORE INTO ref_log_status_rule (
   tag, tx_location_alias, visits_alias, ldot_alias, accident_state_alias,
   legal_status_alias, clinical_status_alias, id_log_status, legacy_rule_id, is_active
-) VALUES (NULL, 'COR/AFF', '<12V', '>60D', 'PIP STATE', 'SIGNED', 'DROPPED', 2, 109, 1);
+) VALUES (NULL, 'COR/AFF', '<12V', '>60D', 'PIP STATE', 'SIGNED', 'DROPPED', 1, 109, 1);
 INSERT IGNORE INTO ref_log_status_rule (
   tag, tx_location_alias, visits_alias, ldot_alias, accident_state_alias,
   legal_status_alias, clinical_status_alias, id_log_status, legacy_rule_id, is_active
