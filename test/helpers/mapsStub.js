@@ -21,7 +21,7 @@ function buildMaps(overrides = {}) {
   return {
     resolveAttorneyProfileId: (key) => (key === "Smith PA" ? 31 : null),
     txByName: new Map([["Miami Clinic", 41]]),
-    leadStatusByName: new Map([["New", 1], ["Signed", 2]]),
+    leadStatusByName: new Map([["New", 1], ["Signed", 2], ["Came In", 9]]),
     clinicalStatusByName: new Map([["Pending", 1]]),
     legalStatusByName: new Map([["Open", 1]]),
     stageByCode: new Map([["Owned", 7], ["New", 1]]),

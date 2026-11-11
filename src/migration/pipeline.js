@@ -84,6 +84,19 @@ function trimOrNull(v) {
   return s === '' ? null : s;
 }
 
+/** refLeadStatus guarda "Came In"; Glide a veces manda "Came in". */
+function resolveLeadStatusId(map, name) {
+  const text = trimOrNull(name);
+  if (!text || !map) return null;
+  const exact = map.get(text);
+  if (exact != null) return exact;
+  const key = text.toLowerCase();
+  for (const [label, id] of map) {
+    if (String(label).toLowerCase() === key) return id;
+  }
+  return null;
+}
+
 function bool(v) {
   return v ? 1 : 0;
 }
@@ -192,7 +205,8 @@ function addPhoneChannels(channels, l, maps) {
     pushChannel(channels, maps, TYPE.PHONE_INTAKE_RAW, orig, null, false);
   }
   const fmt = trimOrNull(l.formattedPhoneEntry);
-  if (fmt && fmt !== phone && fmt !== orig) {
+  // El portal lee solo este tipo. En Glide suele ser igual a originalPhoneEntry.
+  if (fmt) {
     pushChannel(channels, maps, TYPE.PHONE_INTAKE_FORMATTED, fmt, null, false);
   }
 }
@@ -216,7 +230,7 @@ function transformLead(l, maps) {
   const idAttorney = resolveAttorneyFk(maps, l.attorney, leadId, 'attorney', rejects);
   const prevAttorney = resolvePrevAttorney(maps, l.prevAttyName);
   const idTx = resolveFk(maps.txByName, l.txLocation, leadId, 'tx_location', rejects);
-  const idLeadStatus = maps.leadStatusByName.get(trimOrNull(l.leadStatus) || '') ?? null;
+  const idLeadStatus = resolveLeadStatusId(maps.leadStatusByName, l.leadStatus);
   const idClinical = maps.clinicalStatusByName.get(trimOrNull(l.clinicalStatus) || '') ?? null;
   const idLegal = maps.legalStatusByName.get(trimOrNull(l.legalStatus) || '') ?? null;
   const idStage = resolveStage(maps, l.stage);

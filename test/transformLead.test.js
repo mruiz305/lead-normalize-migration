@@ -36,6 +36,25 @@ describe("transformLead happy path", () => {
     assert.ok(!rejectReasons(out).includes("office_catalog_miss"));
     // officeLabel "MIA" se reusa como email de org_office → user_miss esperado
   });
+
+  it("Came in de Glide resuelve al Came In del catálogo", () => {
+    const out = transformLead(baseLead({ leadStatus: "Came in" }), buildMaps());
+    assert.equal(out.lead[1], 9);
+  });
+
+  it("copia formattedPhoneEntry aunque sea igual al original", () => {
+    const out = transformLead(
+      baseLead({
+        phone: "3055551234",
+        originalPhoneEntry: "(305) 555-1234",
+        formattedPhoneEntry: "(305) 555-1234",
+      }),
+      buildMaps()
+    );
+    const formatted = out.channels.find((c) => c[0] === 3);
+    assert.ok(formatted);
+    assert.equal(formatted[1], "(305) 555-1234");
+  });
 });
 
 describe("transformLead fechas y catálogos", () => {
