@@ -5,6 +5,8 @@ const {
   mapCommentRow,
   upsertCommentBatch,
   resolveStartAfterId,
+  commentAuthor,
+  pickExistingCommentId,
   OVERLAP_MINUTES,
 } = require('../src/migration/leadCommentSync');
 
@@ -59,6 +61,21 @@ describe('upsertCommentBatch', () => {
     const conn = fakeConn();
     assert.deepEqual(await upsertCommentBatch(conn, []), { written: 0, changed: 0 });
     assert.equal(conn.calls.length, 0);
+  });
+});
+
+describe('comentario del portal hacia tblLeadComments', () => {
+  it('manda el email del autor', () => {
+    assert.equal(commentAuthor('Ana@TNFG.com', 'Ana'), 'Ana@TNFG.com');
+    assert.equal(commentAuthor(null, 'Ana'), 'Ana');
+    assert.equal(commentAuthor('  ', ''), null);
+  });
+
+  it('enlaza el que ya existe con la misma hora, o el único con el mismo texto', () => {
+    const rows = [{ idComment: 4, posted: '2026-11-13 21:32:17.000000' }, { idComment: 9, posted: '2026-11-13 22:06:16.000000' }];
+    assert.equal(pickExistingCommentId(rows, new Set(), '2026-11-13 22:06:16.000000'), 9);
+    assert.equal(pickExistingCommentId(rows, new Set(), 'otra'), null);
+    assert.equal(pickExistingCommentId(rows, new Set([9]), 'otra'), 4);
   });
 });
 

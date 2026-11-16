@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * tblLeadComments → lead_note (note_type=comment, identidad glide_comment_id).
+ * tblLeadComments → lead_note, y los comentarios nacidos en el portal → tblLeadComments.
  *
  *   npm run sync:lead-comments               resume (default): ids nuevos + solape 30 min
  *   npm run sync:lead-comments -- --full     recorre todo prod y upsertea (no borra)

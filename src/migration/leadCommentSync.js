@@ -226,6 +226,125 @@ async function upsertCommentBatch(targetConn, rows) {
   return { written: rows.length, changed: affected };
 }
 
+function commentAuthor(email, postedBy) {
+  const value = trimOrNull(email) || trimOrNull(postedBy);
+  return value ? value.slice(0, 255) : null;
+}
+
+/**
+ * idComment de prod que ya dice lo mismo. Exacto por fecha, o el único libre
+ * con el mismo texto. Si hay varios y ninguno coincide en la hora, no se
+ * adivina: se inserta otro.
+ */
+function pickExistingCommentId(candidates, used, posted) {
+  const free = candidates.filter((c) => !used.has(Number(c.idComment)));
+  const exact = free.find((c) => c.posted === posted);
+  if (exact) return Number(exact.idComment);
+  if (free.length === 1) return Number(free[0].idComment);
+  return null;
+}
+
+/**
+ * Comentarios nacidos en el portal (glide_comment_id vacío) → tblLeadComments.
+ * Después se guarda el idComment en glide_comment_id: el sync de vuelta hace
+ * upsert sobre esa fila y no crea un segundo comentario en lead_note.
+ * Corre después de traer lo de Glide, para no mover el cursor de ids antes.
+ */
+async function pushPortalComments(sourceConn, targetConn) {
+  const db = config.target.database;
+  const src = config.source.database;
+  const [notes] = await targetConn.query(
+    `SELECT n.id_note, l.glide_id, TRIM(n.body) AS body,
+            DATE_FORMAT(n.posted_at, '%Y-%m-%d %H:%i:%s.%f') AS posted,
+            n.posted_by, u.email AS author_email
+       FROM \`${db}\`.lead_note n
+       JOIN \`${db}\`.\`lead\` l ON l.id_lead = n.id_lead
+       LEFT JOIN \`${db}\`.app_user u ON u.id_user = n.posted_by_user_id
+      WHERE n.note_type = ?
+        AND n.glide_comment_id IS NULL
+        AND l.glide_id IS NOT NULL
+        AND n.body IS NOT NULL AND TRIM(n.body) <> ''
+      ORDER BY n.id_note`,
+    [NOTE_TYPE]
+  );
+  if (!notes.length) return { pending: 0, linked: 0, inserted: 0 };
+
+  const glideIds = [...new Set(notes.map((n) => Number(n.glide_id)))];
+  const used = new Set();
+  const [taken] = await targetConn.query(
+    `SELECT glide_comment_id FROM \`${db}\`.lead_note WHERE glide_comment_id IS NOT NULL`
+  );
+  for (const r of taken) used.add(Number(r.glide_comment_id));
+  const byKey = new Map();
+  const chunk = 400;
+  for (let i = 0; i < glideIds.length; i += chunk) {
+    const ids = glideIds.slice(i, i + chunk);
+    const ph = ids.map(() => '?').join(',');
+    const [existing] = await sourceConn.query(
+      `SELECT idComment, IdLead, comment,
+              DATE_FORMAT(posted, '%Y-%m-%d %H:%i:%s.%f') AS posted
+         FROM \`${src}\`.tblLeadComments
+        WHERE IdLead IN (${ph})`,
+      ids
+    );
+    for (const r of existing) {
+      const key = `${Number(r.IdLead)}\0${String(r.comment).trim()}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push({ idComment: Number(r.idComment), posted: r.posted });
+    }
+  }
+
+  let linked = 0;
+  let inserted = 0;
+  for (const note of notes) {
+    const key = `${Number(note.glide_id)}\0${note.body}`;
+    const candidates = byKey.get(key) || [];
+    let idComment = pickExistingCommentId(candidates, used, note.posted);
+    let created = false;
+    if (idComment == null) {
+      const [res] = await sourceConn.query(
+        `INSERT INTO \`${src}\`.tblLeadComments (IdLead, comment, posted, postedBy)
+         VALUES (?, ?, ?, ?)`,
+        [Number(note.glide_id), note.body, note.posted, commentAuthor(note.author_email, note.posted_by)]
+      );
+      idComment = Number(res.insertId);
+      candidates.push({ idComment, posted: note.posted });
+      byKey.set(key, candidates);
+      inserted += 1;
+      created = true;
+    } else {
+      linked += 1;
+    }
+    used.add(idComment);
+    try {
+      await targetConn.query(
+        `UPDATE \`${db}\`.lead_note
+            SET glide_comment_id = ?
+          WHERE id_note = ? AND glide_comment_id IS NULL`,
+        [idComment, note.id_note]
+      );
+    } catch (err) {
+      if (err.code !== 'ER_DUP_ENTRY') throw err;
+      const [retry] = await sourceConn.query(
+        `INSERT INTO \`${src}\`.tblLeadComments (IdLead, comment, posted, postedBy)
+         VALUES (?, ?, ?, ?)`,
+        [Number(note.glide_id), note.body, note.posted, commentAuthor(note.author_email, note.posted_by)]
+      );
+      idComment = Number(retry.insertId);
+      used.add(idComment);
+      inserted += 1;
+      if (!created) linked -= 1;
+      await targetConn.query(
+        `UPDATE \`${db}\`.lead_note
+            SET glide_comment_id = ?
+          WHERE id_note = ? AND glide_comment_id IS NULL`,
+        [idComment, note.id_note]
+      );
+    }
+  }
+  return { pending: notes.length, linked, inserted };
+}
+
 async function syncLeadComments(sourceConn, targetConn, maps, { truncate = true, resume = false, onProgress } = {}) {
   const db = config.target.database;
   const src = config.source.database;
@@ -294,12 +413,19 @@ async function syncLeadComments(sourceConn, targetConn, maps, { truncate = true,
   const [[{ n }]] = await targetConn.query(
     `SELECT COUNT(*) AS n FROM \`${db}\`.\`${TABLE}\` WHERE glide_comment_id IS NOT NULL`
   );
+  const pushed = await pushPortalComments(sourceConn, targetConn);
+  if (pushed.pending) {
+    console.log(
+      `  ✓ portal → tblLeadComments: ${pushed.inserted} nuevos, ${pushed.linked} ya estaban`
+    );
+  }
+
   console.log(
     `  ✓ lead_note (Glide): ${n} filas (${written} escritos, ${changed} con cambios` +
       (sinLead ? `, ${sinLead} sin lead en el modelo` : '') +
       ` en esta corrida)`
   );
-  return { written, changed, sinLead, scanned, total: Number(n), glideId };
+  return { written, changed, sinLead, scanned, total: Number(n), glideId, pushed };
 }
 
 module.exports = {
@@ -311,5 +437,8 @@ module.exports = {
   resolveStartAfterId,
   mapCommentRow,
   upsertCommentBatch,
+  commentAuthor,
+  pickExistingCommentId,
+  pushPortalComments,
   syncLeadComments,
 };
